@@ -20,6 +20,7 @@
 //    CF_ACCOUNT_ID CF 账户监控：账户 ID（可选，与 CF_API_TOKEN 同时设置后可在面板查看当日用量）
 //    CF_API_TOKEN  CF 账户监控：API 令牌（可选，需 Workers 用量分析读取权限，如 Account Analytics 读权限）
 //    K            已绑定 KV 命名空间时读取图形化配置
+//    RELAY_EXIT_PROBE  设为 0/false 关闭节点名里的地点后缀（可选；后缀为逐节点按优选源机房码生成）
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
@@ -680,12 +681,19 @@ const BUILTIN_PREFERRED_IPS = [
 // 默认优选域名：第三方 CNAME 域名，解析到 Cloudflare 边缘；
 // 节点 server 直接下发域名（客户端连接时动态 DNS 解析，拿到当前最优 CF 边缘 IP，可用性远高于静态 IP 快照）
 const DEFAULT_PREFERRED_DOMAINS = [
-  'cloudflare.182682.xyz', 'speed.marisalnc.com', 'freeyx.cloudflare88.eu.org', 'bestcf.top',
-  'cdn.2020111.xyz', 'cfip.cfcdn.vip', 'cf.0sm.com', 'cf.090227.xyz', 'cf.zhetengsha.eu.org',
-  'cloudflare.9jy.cc', 'cf.zerone-cdn.pp.ua', 'cfip.1323123.xyz', 'cnamefuckxxs.yuchen.icu',
-  'cloudflare-ip.mofashi.ltd', '115155.xyz', 'cname.xirancdn.us', 'f3058171cad.002404.xyz',
-  '8.889288.xyz', 'cdn.tzpro.xyz', 'cf.877771.xyz', 'xn--b6gac.eu.org',
-  'bestcf.030101.xyz', 'cdns.doon.eu.org', 'fn.130519.xyz', 'saas.sin.fan'
+  'cloudflare.182682.xyz',
+  'cf.0sm.com',
+  'cf.090227.xyz',
+  'cfip.1323123.xyz',
+  'cnamefuckxxs.yuchen.icu',
+  'cloudflare-ip.mofashi.ltd',
+  'cdn.tzpro.xyz',
+  'cf.877771.xyz',
+  'xn--b6gac.eu.org',
+  'bestcf.030101.xyz',
+  'cdns.doon.eu.org',
+  'fn.130519.xyz',
+  'saas.sin.fan'
 ].join('\n');
 
 
@@ -999,6 +1007,8 @@ async function loadConfig(env) {
   // 节点测活：环境变量 PROBE_ALIVE=1/true 强制开启，=0/false 强制关闭（不走面板也能改）
   if (env.PROBE_ALIVE === '1' || env.PROBE_ALIVE === 'true') cfg.probeAlive = true;
   if (env.PROBE_ALIVE === '0' || env.PROBE_ALIVE === 'false') cfg.probeAlive = false;
+  // 节点名地点后缀开关：RELAY_EXIT_PROBE=0/false 关闭（关闭后节点名不再逐节点追加地点段）
+  if (env.RELAY_EXIT_PROBE === '0' || env.RELAY_EXIT_PROBE === 'false') cfg._noExitProbe = true;
   // KV 图形化配置（更高优先级）
   if (env.K && typeof env.K.get === 'function') {
     try {
@@ -1750,7 +1760,10 @@ function findBytes(hay, needle) {
 // TLS 数据，由对端按 SNI 路由到目标
 // ---------------------------------------------------------------------------
 const RELAY_DOMAINS = {
-  HK: 'proxyip.hk.cmliussss.net',
+  // 【键序 = 兜底顺序】openOutbound 取 [primary, ...本表键序] 的前 3 个依次尝试。
+  // 2026-09-25：HK 从第 1 位移到 GB 之后 —— 香港出口被 ChatGPT / Claude / Gemini 等封禁，
+  // 不能出现在任何机房的兜底前排（原来 primary=US 时会按 US→HK→AU 试，第一兜底就是香港）。
+  AU: 'proxyip.au.cmliussss.net',
   US: 'proxyip.us.cmliussss.net',
   SG: 'proxyip.sg.cmliussss.net',
   JP: 'proxyip.jp.cmliussss.net',
@@ -1760,32 +1773,481 @@ const RELAY_DOMAINS = {
   NL: 'proxyip.nl.cmliussss.net',
   FI: 'proxyip.fi.cmliussss.net',
   GB: 'proxyip.gb.cmliussss.net',
+  HK: 'proxyip.hk.cmliussss.net',
   Oracle: 'proxyip.oracle.cmliussss.net',
   DigitalOcean: 'proxyip.digitalocean.cmliussss.net',
   Vultr: 'proxyip.vultr.cmliussss.net',
   Multacom: 'proxyip.multacom.cmliussss.net'
 };
 
-// 根据 Worker 所在机房 colo（IATA 代码）选择最近的中继地区
+// 根据 Worker 所在机房 colo（IATA 代码）选择最近的地区反代（RELAY_DOMAINS 的键）。
+//
+// 【修正 2026-09-25】原实现用 startsWith 前缀匹配，导致 **5 个机房**被判到错误地区，
+// 出站会走错地区的反代 —— 其中被判到香港的会被 ChatGPT / Claude / Gemini 等大量服务判为不可用地区：
+//   ① SJC（圣何塞，美西）被兜底那行归为 HK  → 应 US。该行除 SJC 外全部与上面几行重复，实际只对 SJC 生效。
+//   ② SEA（西雅图，美西）被 startsWith('SE') 判为 SE（瑞典）→ 应 US。
+//   ③ DEN（丹佛，美西）被 startsWith('DE') 判为 DE（德国）→ 应 US。
+//   ④ ATL（亚特兰大，美东）被兜底正则里的 AT（奥地利）判为 DE → 应 US。
+//   ⑤ DEL（德里，印度）被同一条正则里的 DE 判为 DE → 应 US（原实现的默认值）。
+// 根因：对 3 字 IATA 码做前缀匹配必然误伤（任意短前缀都可能撞上别的城市码）。
+// 现改为按 3 字码**精确匹配**（request.cf.colo 恒为 3 字码），表内未收录的码统一默认 US
+// （美区反代对 AI 服务最安全，也是原实现的默认值）。
+// 【出口归并】某些机房的流量改由别的地区反代出 —— 仅在某机房本地出口被目标站封禁时才需要。
+//   当前为**空表**（没有任何机房被归并）：
+//     TPE 于 2026-09-25 撤销（台湾本来就没有可用的地区反代池）；
+//     HKG 随后按用户要求一并撤销 —— 香港出口就写香港。COLO_REGION_MAP 本就把 HKG 判为 HK，
+//     撤销后香港机房的 primary 反代即 proxyip.hk.cmliussss.net，名字与实际出口一致。
+// 归并生效时必须两边同源：运行时用目标地区反代（selectRelayRegion），节点名也写目标地区（geoNameSuffix），
+// 否则名字会与「网站实际看到的地点」不符。
+// 需要重新归并时在下面加一项即可（例：HKG 归并到 JP 写作 HKG: 'JP'）—— COLO_REGION_MAP 的地理真相不受影响。
+const EXIT_VIA_REGION = {};
+
+// 各反代地区的「代表出口地点」，用于归并后的节点命名。
+// 注意：出口是**反代机**（不在 CF 机房），这里的 code 只是该地区的代表码，
+// 不表示流量真的经过那个 CF 机房。JP 取东京 —— 实测 jp 池 46 条 A 记录里东京占 81%
+// （Tokyo 28 + 港区/千代田等 6），其余为大阪 6、横滨 1。
+const REGION_EXIT_GEO = {
+  JP: { zh: '日本', cc: 'JP', city: '东京', code: 'TYO' },
+  HK: { zh: '中国香港', cc: 'HK', city: '香港', code: 'HKG' },
+  SG: { zh: '新加坡', cc: 'SG', city: '新加坡', code: 'SIN' },
+  KR: { zh: '韩国', cc: 'KR', city: '首尔', code: 'ICN' },
+  US: { zh: '美国', cc: 'US', city: '洛杉矶', code: 'LAX' },
+  AU: { zh: '澳大利亚', cc: 'AU', city: '悉尼', code: 'SYD' },
+  DE: { zh: '德国', cc: 'DE', city: '法兰克福', code: 'FRA' },
+  SE: { zh: '瑞典', cc: 'SE', city: '斯德哥尔摩', code: 'ARN' },
+  NL: { zh: '荷兰', cc: 'NL', city: '阿姆斯特丹', code: 'AMS' },
+  FI: { zh: '芬兰', cc: 'FI', city: '赫尔辛基', code: 'HEL' },
+  GB: { zh: '英国', cc: 'GB', city: '伦敦', code: 'LHR' }
+};
+
+const COLO_REGION_MAP = (() => {
+  const m = Object.create(null);
+  const put = (region, codes) => { for (const c of [].concat(codes)) m[c] = region; };
+  put('HK', 'HKG');
+  // 澳洲（本轮新增）：实测 proxyip.au.cmliussss.net 可达且 loc=AU；原实现无澳洲映射 →
+  // SYD/MEL 落兜底 'US'，澳洲节点被反向绕到美国（延迟 +150ms，且名字写成「美国」）
+  put('AU', ['SYD', 'MEL', 'BNE', 'PER', 'ADL', 'CBR', 'HBA', 'LST', 'DRW', 'CNS', 'MCY']);
+  put('SG', 'SIN');
+  put('JP', ['NRT', 'HND', 'KIX', 'TYO', 'OSA', 'NGO', 'CTS', 'FUK', 'OKA']);
+  put('KR', ['ICN', 'SEL', 'PUS']);
+  put('DE', ['FRA', 'MUC', 'DUS', 'BER', 'HAM', 'STR', 'VIE', 'ZRH', 'CDG', 'MAD', 'MXP', 'FCO', 'PRG', 'WAW']);
+  put('SE', 'ARN');
+  put('NL', 'AMS');
+  put('FI', 'HEL');
+  put('GB', ['LHR', 'LGW', 'MAN', 'EDI']);
+  // 北美（含加拿大 / 拉美）：SJC、SEA、DEN、ATL 四处修正后归此
+  put('US', ['LAX', 'SJC', 'SFO', 'SEA', 'PDX', 'SAN', 'LAS', 'PHX', 'SLC', 'DEN',
+    'DFW', 'IAH', 'AUS', 'ORD', 'MSP', 'DTW', 'STL', 'MCI', 'ATL', 'MIA', 'MCO', 'BNA',
+    'CLT', 'IAD', 'BOS', 'EWR', 'JFK', 'PHL', 'YYZ', 'YVR', 'YUL', 'MEX', 'GRU']);
+  return m;
+})();
+// 兼容直接写地区名（如面板/环境变量传入 'HK'、'us'）
+const COLO_REGION_ALIAS = { HK: 'HK', SG: 'SG', JP: 'JP', KR: 'KR', DE: 'DE', SE: 'SE', NL: 'NL', FI: 'FI', GB: 'GB', US: 'US', AU: 'AU' };
 function selectRelayRegion(colo) {
-  const c = (colo || '').toUpperCase();
-  // 亚洲
-  if (c.startsWith('HKG') || c.startsWith('HK')) return 'HK';
-  if (c.startsWith('SIN') || c.startsWith('SG')) return 'SG';
-  if (c.startsWith('NRT') || c.startsWith('KIX') || c.startsWith('TYO') || c.startsWith('OSA') || c.startsWith('JP')) return 'JP';
-  if (c.startsWith('ICN') || c.startsWith('SEL') || c.startsWith('KR')) return 'KR';
-  if (/^(HKG|SIN|NRT|KIX|ICN|TYO|OSA|SEL|HK|SG|JP|KR|SJC)/.test(c)) return 'HK';
-  // 欧洲
-  if (c.startsWith('FRA') || c.startsWith('BER') || c.startsWith('MUC') || c.startsWith('DUS') || c.startsWith('HAM') || c.startsWith('STR') || c.startsWith('DE')) return 'DE';
-  if (c.startsWith('ARN') || c.startsWith('SE')) return 'SE';
-  if (c.startsWith('AMS') || c.startsWith('NL')) return 'NL';
-  if (c.startsWith('HEL') || c.startsWith('FI')) return 'FI';
-  if (c.startsWith('LHR') || c.startsWith('MAN') || c.startsWith('GB') || c.startsWith('UK')) return 'GB';
-  if (/^(FRA|ARN|AMS|HEL|LHR|MAN|CDG|MAD|VIE|ZRH|MXP|PRG|WAW|BER|MUC|DUS|HAM|STR|DE|SE|NL|FI|GB|UK|FR|ES|AT|CH|IT|CZ|PL)/.test(c)) return 'DE';
-  // 北美及其他默认 US
-  return 'US';
+  const c = String(colo || '').toUpperCase();
+  if (!c) return 'US';
+  if (EXIT_VIA_REGION[c]) return EXIT_VIA_REGION[c];   // ① 出口归并（当前空表；HKG / TPE 均不归并）
+  if (COLO_REGION_MAP[c]) return COLO_REGION_MAP[c];   // 3 字 IATA 码：精确匹配
+  if (COLO_REGION_ALIAS[c]) return COLO_REGION_ALIAS[c];
+  return 'US';   // 未知机房：默认美区（原实现默认值）
 }
 
+const COLO_GEO = (() => {
+  const m = Object.create(null);
+  const rows = [
+  'AAE|安纳巴|阿尔及利亚 DZ',
+  'ABJ|阿比让|科特迪瓦 CI',
+  'ABQ|阿尔伯克基|美国 US',
+  'ACC|阿克拉|加纳 GH',
+  'ACX|兴义|中国 CN',
+  'ADB|伊兹密尔|土耳其 TR',
+  'ADD|亚的斯亚贝巴|埃塞俄比亚 ET',
+  'ADL|阿德莱德|澳大利亚 AU',
+  'AGR|阿格拉|印度 IN',
+  'AIP|贾朗达尔|印度 IN',
+  'AKL|奥克兰|新西兰 NZ',
+  'AKX|阿克托别|哈萨克斯坦 KZ',
+  'ALA|阿拉木图|哈萨克斯坦 KZ',
+  'ALG|阿尔及尔|阿尔及利亚 DZ',
+  'AMD|艾哈迈达巴德|印度 IN',
+  'AMM|安曼|约旦 JO',
+  'AMS|阿姆斯特丹|荷兰 NL',
+  'ANC|安克雷奇|美国 US',
+  'ARI|阿里卡|智利 CL',
+  'ARN|斯德哥尔摩|瑞典 SE',
+  'ARU|阿拉萨图巴|巴西 BR',
+  'ASK|亚穆苏克罗|科特迪瓦 CI',
+  'ASU|亚松森|巴拉圭 PY',
+  'ATH|雅典|希腊 GR',
+  'ATL|亚特兰大|美国 US',
+  'AUS|奥斯汀|美国 US',
+  'AVA|安顺|中国 CN',
+  'BAH|麦纳麦|巴林 BH',
+  'BAQ|巴兰基亚|哥伦比亚 CO',
+  'BBI|布巴内斯瓦尔|印度 IN',
+  'BCN|巴塞罗那|西班牙 ES',
+  'BDQ|贾姆讷格尔|印度 IN',
+  'BEG|贝尔格莱德|塞尔维亚 RS',
+  'BEL|贝伦|巴西 BR',
+  'BEY|贝鲁特|黎巴嫩 LB',
+  'BGI|布里奇顿|巴巴多斯 BB',
+  'BGR|班戈|美国 US',
+  'BGW|巴格达|伊拉克 IQ',
+  'BKK|曼谷|泰国 TH',
+  'BLR|班加罗尔|印度 IN',
+  'BNA|纳什维尔|美国 US',
+  'BNE|布里斯班|澳大利亚 AU',
+  'BOD|波尔多|法国 FR',
+  'BOG|波哥大|哥伦比亚 CO',
+  'BOM|孟买|印度 IN',
+  'BOS|波士顿|美国 US',
+  'BRU|布鲁塞尔|比利时 BE',
+  'BSB|巴西利亚|巴西 BR',
+  'BSR|巴士拉|伊拉克 IQ',
+  'BTS|布拉迪斯拉发|斯洛伐克 SK',
+  'BUD|布达佩斯|匈牙利 HU',
+  'BUF|布法罗|美国 US',
+  'BWN|斯里巴加湾市|文莱 BN',
+  'CAI|开罗|埃及 EG',
+  'CAN|广州|中国 CN',
+  'CAW|坎普斯|巴西 BR',
+  'CBR|堪培拉|澳大利亚 AU',
+  'CCU|加尔各答|印度 IN',
+  'CDG|巴黎|法国 FR',
+  'CEB|宿务|菲律宾 PH',
+  'CFC|卡萨多尔|巴西 BR',
+  'CGB|库亚巴|巴西 BR',
+  'CGD|常德|中国 CN',
+  'CGK|雅加达|印度尼西亚 ID',
+  'CGO|郑州|中国 CN',
+  'CGP|吉大港|孟加拉国 BD',
+  'CGY|卡加延德奥罗|菲律宾 PH',
+  'CHC|基督城|新西兰 NZ',
+  'CJB|哥印拜陀|印度 IN',
+  'CKG|重庆|中国 CN',
+  'CLE|克利夫兰|美国 US',
+  'CLO|卡利|哥伦比亚 CO',
+  'CLT|夏洛特|美国 US',
+  'CMB|科伦坡|斯里兰卡 LK',
+  'CMH|哥伦布|美国 US',
+  'CNF|贝洛奥里藏特|巴西 BR',
+  'CNN|坎努尔|印度 IN',
+  'CNX|清迈|泰国 TH',
+  'COK|科钦|印度 IN',
+  'COR|科尔多瓦|阿根廷 AR',
+  'CPH|哥本哈根|丹麦 DK',
+  'CPT|开普敦|南非 ZA',
+  'CRK|打拉|菲律宾 PH',
+  'CSX|长沙|中国 CN',
+  'CTU|成都|中国 CN',
+  'CVG|辛辛那提|美国 US',
+  'CWB|库里蒂巴|巴西 BR',
+  'CZL|君士坦丁|阿尔及利亚 DZ',
+  'CZX|常州|中国 CN',
+  'DAC|达卡|孟加拉国 BD',
+  'DAD|岘港|越南 VN',
+  'DAR|达累斯萨拉姆|坦桑尼亚 TZ',
+  'DEL|新德里|印度 IN',
+  'DEN|丹佛|美国 US',
+  'DFW|达拉斯|美国 US',
+  'DKR|达喀尔|塞内加尔 SN',
+  'DLA|杜阿拉|喀麦隆 CM',
+  'DLC|大连|中国 CN',
+  'DME|莫斯科|俄罗斯 RU',
+  'DMM|达曼|沙特阿拉伯 SA',
+  'DOH|多哈|卡塔尔 QA',
+  'DPS|登巴萨|印度尼西亚 ID',
+  'DTW|底特律|美国 US',
+  'DUB|都柏林|爱尔兰 IE',
+  'DUR|德班|南非 ZA',
+  'DUS|杜塞尔多夫|德国 DE',
+  'DXB|迪拜|阿联酋 AE',
+  'DYU|杜尚别|塔吉克斯坦 TJ',
+  'EBB|坎帕拉|乌干达 UG',
+  'EBL|埃尔比勒|伊拉克 IQ',
+  'EVN|埃里温|亚美尼亚 AM',
+  'EWR|纽瓦克|美国 US',
+  'EZE|布宜诺斯艾利斯|阿根廷 AR',
+  'FCO|罗马|意大利 IT',
+  'FIH|金沙萨|刚果金 CD',
+  'FLN|弗洛里亚诺波利斯|巴西 BR',
+  'FOC|福州|中国 CN',
+  'FOR|福塔莱萨|巴西 BR',
+  'FRA|法兰克福|德国 DE',
+  'FRU|比什凯克|吉尔吉斯斯坦 KG',
+  'FSD|苏福尔斯|美国 US',
+  'FUK|福冈|日本 JP',
+  'FUO|佛山|中国 CN',
+  'GBE|哈博罗内|博茨瓦纳 BW',
+  'GDL|瓜达拉哈拉|墨西哥 MX',
+  'GEO|乔治敦|圭亚那 GY',
+  'GIG|里约热内卢|巴西 BR',
+  'GND|圣乔治|格林纳达 GD',
+  'GOT|哥德堡|瑞典 SE',
+  'GRU|圣保罗|巴西 BR',
+  'GUA|危地马拉城|危地马拉 GT',
+  'GUM|阿加尼亚|关岛 GU',
+  'GVA|日内瓦|瑞士 CH',
+  'GYD|巴库|阿塞拜疆 AZ',
+  'GYE|瓜亚基尔|厄瓜多尔 EC',
+  'GYN|戈亚尼亚|巴西 BR',
+  'HAK|海口|中国 CN',
+  'HAM|汉堡|德国 DE',
+  'HAN|河内|越南 VN',
+  'HBA|霍巴特|澳大利亚 AU',
+  'HEL|赫尔辛基|芬兰 FI',
+  'HFA|海法|以色列 IL',
+  'HGH|绍兴|中国 CN',
+  'HNL|檀香山|美国 US',
+  'HRE|哈拉雷|津巴布韦 ZW',
+  'HYD|海得拉巴|印度 IN',
+  'HYN|台州|中国 CN',
+  'IAD|华盛顿|美国 US',
+  'IAH|休斯敦|美国 US',
+  'ICN|首尔|韩国 KR',
+  'IND|印第安纳波利斯|美国 US',
+  'ISB|伊斯兰堡|巴基斯坦 PK',
+  'IST|伊斯坦布尔|土耳其 TR',
+  'ISU|苏莱曼尼亚|伊拉克 IQ',
+  'IXC|昌迪加尔|印度 IN',
+  'JAX|杰克逊维尔|美国 US',
+  'JDO|北茹阿泽鲁|巴西 BR',
+  'JED|吉达|沙特阿拉伯 SA',
+  'JHB|新山|马来西亚 MY',
+  'JIB|吉布提市|吉布提 DJ',
+  'JNB|约翰内斯堡|南非 ZA',
+  'JOG|日惹|印度尼西亚 ID',
+  'JOI|若因维利|巴西 BR',
+  'JRG|桑巴尔普尔|印度 IN',
+  'JXG|嘉兴|中国 CN',
+  'KBP|基辅|乌克兰 UA',
+  'KCH|古晋|马来西亚 MY',
+  'KEF|雷克雅未克|冰岛 IS',
+  'KGL|基加利|卢旺达 RW',
+  'KHI|卡拉奇|巴基斯坦 PK',
+  'KHN|新余|中国 CN',
+  'KIN|金斯敦|牙买加 JM',
+  'KIV|基希讷乌|摩尔多瓦 MD',
+  'KIX|大阪|日本 JP',
+  'KMG|昆明|中国 CN',
+  'KNU|坎普尔|印度 IN',
+  'KTM|加德满都|尼泊尔 NP',
+  'KUL|吉隆坡|马来西亚 MY',
+  'KWE|贵阳|中国 CN',
+  'KWI|科威特城|科威特 KW',
+  'LAD|罗安达|安哥拉 AO',
+  'LAS|拉斯维加斯|美国 US',
+  'LAX|洛杉矶|美国 US',
+  'LCA|尼科西亚|塞浦路斯 CY',
+  'LED|圣彼得堡|俄罗斯 RU',
+  'LHE|拉合尔|巴基斯坦 PK',
+  'LHR|伦敦|英国 GB',
+  'LHW|兰州|中国 CN',
+  'LIM|利马|秘鲁 PE',
+  'LIS|里斯本|葡萄牙 PT',
+  'LJU|卢布尔雅那|斯洛文尼亚 SI',
+  'LLK|阿斯塔拉|阿塞拜疆 AZ',
+  'LLW|利隆圭|马拉维 MW',
+  'LOS|拉各斯|尼日利亚 NG',
+  'LPB|拉巴斯|玻利维亚 BO',
+  'LUH|卢迪亚纳|印度 IN',
+  'LUN|卢萨卡|赞比亚 ZM',
+  'LUX|卢森堡市|卢森堡 LU',
+  'LYA|洛阳|中国 CN',
+  'LYS|里昂|法国 FR',
+  'MAA|金奈|印度 IN',
+  'MAD|马德里|西班牙 ES',
+  'MAN|曼彻斯特|英国 GB',
+  'MAO|马瑙斯|巴西 BR',
+  'MBA|蒙巴萨|肯尼亚 KE',
+  'MCI|堪萨斯城|美国 US',
+  'MCT|马斯喀特|阿曼 OM',
+  'MDE|麦德林|哥伦比亚 CO',
+  'MEL|墨尔本|澳大利亚 AU',
+  'MEM|孟菲斯|美国 US',
+  'MEX|墨西哥城|墨西哥 MX',
+  'MIA|迈阿密|美国 US',
+  'MLA|圣韦内拉|马耳他 MT',
+  'MLE|马累|马尔代夫 MV',
+  'MLG|玛琅|印度尼西亚 ID',
+  'MNL|马尼拉|菲律宾 PH',
+  'MPM|马普托|莫桑比克 MZ',
+  'MRS|马赛|法国 FR',
+  'MRU|路易港|毛里求斯 MU',
+  'MSP|明尼阿波利斯|美国 US',
+  'MSQ|明斯克|白俄罗斯 BY',
+  'MUC|慕尼黑|德国 DE',
+  'MXP|米兰|意大利 IT',
+  'NAG|那格浦尔|印度 IN',
+  'NBO|内罗毕|肯尼亚 KE',
+  'NJF|纳杰夫|伊拉克 IQ',
+  'NOU|努美阿|新喀里多尼亚 NC',
+  'NQN|内乌肯|阿根廷 AR',
+  'NQZ|阿斯塔纳|哈萨克斯坦 KZ',
+  'NRT|东京|日本 JP',
+  'NVT|廷博|巴西 BR',
+  'OKA|那霸|日本 JP',
+  'OKC|俄克拉何马城|美国 US',
+  'OMA|奥马哈|美国 US',
+  'ORD|芝加哥|美国 US',
+  'ORF|诺福克|美国 US',
+  'ORN|奥兰|阿尔及利亚 DZ',
+  'OSL|奥斯陆|挪威 NO',
+  'OTP|布加勒斯特|罗马尼亚 RO',
+  'OUA|瓦加杜古|布基纳法索 BF',
+  'PAT|巴特那|印度 IN',
+  'PBH|廷布|不丹 BT',
+  'PBM|帕拉马里博|苏里南 SR',
+  'PDX|波特兰|美国 US',
+  'PER|珀斯|澳大利亚 AU',
+  'PHL|费城|美国 US',
+  'PHX|凤凰城|美国 US',
+  'PIT|匹兹堡|美国 US',
+  'PKX|廊坊|中国 CN',
+  'PMO|巴勒莫|意大利 IT',
+  'PMW|帕尔马斯|巴西 BR',
+  'PNH|金边|柬埔寨 KH',
+  'PNQ|浦那|印度 IN',
+  'POA|阿雷格里港|巴西 BR',
+  'POS|西班牙港|特立尼达和多巴哥 TT',
+  'PPT|塔希提|法属波利尼西亚 PF',
+  'PRG|布拉格|捷克 CZ',
+  'PTY|巴拿马城|巴拿马 PA',
+  'QRO|克雷塔罗|墨西哥 MX',
+  'QWJ|亚美利加纳|巴西 BR',
+  'RAO|里贝朗普雷图|巴西 BR',
+  'RDU|达勒姆|美国 US',
+  'REC|累西腓|巴西 BR',
+  'RIC|里士满|美国 US',
+  'RIX|里加|拉脱维亚 LV',
+  'RUH|利雅得|沙特阿拉伯 SA',
+  'RUN|圣但尼|留尼汪 RE',
+  'SAN|圣迭戈|美国 US',
+  'SAP|圣佩德罗苏拉|洪都拉斯 HN',
+  'SAT|圣安东尼奥|美国 US',
+  'SCL|圣地亚哥|智利 CL',
+  'SDQ|圣多明各|多米尼加 DO',
+  'SEA|西雅图|美国 US',
+  'SFO|旧金山|美国 US',
+  'SGN|胡志明市|越南 VN',
+  'SHA|上海|中国 CN',
+  'SIN|新加坡|新加坡 SG',
+  'SJC|圣何塞|美国 US',
+  'SJK|圣若泽杜斯坎普斯|巴西 BR',
+  'SJO|圣何塞|哥斯达黎加 CR',
+  'SJP|圣若泽杜里奥普雷图|巴西 BR',
+  'SJU|圣胡安|波多黎各 PR',
+  'SJW|衡水|中国 CN',
+  'SKG|塞萨洛尼基|希腊 GR',
+  'SKP|斯科普里|北马其顿 MK',
+  'SLC|盐湖城|美国 US',
+  'SMF|萨克拉门托|美国 US',
+  'SOD|索罗卡巴|巴西 BR',
+  'SOF|索非亚|保加利亚 BG',
+  'SSA|萨尔瓦多|巴西 BR',
+  'STI|圣地亚哥-德洛斯卡巴列罗斯|多米尼加 DO',
+  'STL|圣路易斯|美国 US',
+  'STR|斯图加特|德国 DE',
+  'SUV|苏瓦|斐济 FJ',
+  'SYD|悉尼|澳大利亚 AU',
+  'SZX|深圳|中国 CN',
+  'TAO|青岛|中国 CN',
+  'TBS|第比利斯|格鲁吉亚 GE',
+  'TEN|铜仁|中国 CN',
+  'TGU|特古西加尔巴|洪都拉斯 HN',
+  'TIA|地拉那|阿尔巴尼亚 AL',
+  'TLH|塔拉哈西|美国 US',
+  'TLL|塔林|爱沙尼亚 EE',
+  'TLV|特拉维夫|以色列 IL',
+  'TNA|济南|中国 CN',
+  'TNR|塔那那利佛|马达加斯加 MG',
+  'TPA|坦帕|美国 US',
+  'TUN|突尼斯市|突尼斯 TN',
+  'TXL|柏林|德国 DE',
+  'TYN|阳泉|中国 CN',
+  'UDI|乌贝兰迪亚|巴西 BR',
+  'UDR|乌代布尔|印度 IN',
+  'UIO|基多|厄瓜多尔 EC',
+  'ULN|乌兰巴托|蒙古 MN',
+  'URT|素叻他尼|泰国 TH',
+  'VCP|坎皮纳斯|巴西 BR',
+  'VIE|维也纳|奥地利 AT',
+  'VIX|维多利亚|巴西 BR',
+  'VNO|维尔纽斯|立陶宛 LT',
+  'VTE|万象|老挝 LA',
+  'WAW|华沙|波兰 PL',
+  'WDH|温得和克|纳米比亚 NA',
+  'WLG|惠灵顿|新西兰 NZ',
+  'WRO|弗罗茨瓦夫|波兰 PL',
+  'XAP|沙佩科|巴西 BR',
+  'XFN|襄阳|中国 CN',
+  'XIY|宝鸡|中国 CN',
+  'XNH|纳西里耶|伊拉克 IQ',
+  'YHZ|哈利法克斯|加拿大 CA',
+  'YUL|蒙特利尔|加拿大 CA',
+  'YVR|温哥华|加拿大 CA',
+  'YWG|温尼伯|加拿大 CA',
+  'YXE|萨斯卡通|加拿大 CA',
+  'YYC|卡尔加里|加拿大 CA',
+  'YYZ|多伦多|加拿大 CA',
+  'ZAG|萨格勒布|克罗地亚 HR',
+  'ZRH|苏黎世|瑞士 CH',
+  'HKG|香港|中国 CN',
+  'TPE|台北|中国 CN',
+  'MFM|澳门|中国 CN'
+  ];
+  for (const s of rows) { const i = s.indexOf('|'); const j = s.indexOf('|', i + 1);
+    m[s.slice(0, i)] = { city: s.slice(i + 1, j), country: s.slice(j + 1) }; }
+  return m;
+})();
+// ─────────────────────────────────────────────────────────────────────────────
+// 节点名后缀：**逐节点**写「该节点流量进入 CF 的机房」= 目标网站看到的地点（2026-09-25 第 2 版）
+// 真值来源：优选源每行自带的「国家码 + 机房码」。bestcf 地区池的格式：
+//   123.51.23.113:443#地区随机 | 澳大利亚 AU | SYD | 123.51.23.113:443
+//                            ↑ 国家码        ↑ 机房码(IATA)
+// 实测核对（本机在悉尼，逐池抽样、对真实 TLS 连接读 cf-ray 尾码）：
+//   AU 池 → SYD/MEL(loc=AU)   US 池 → IAD/EWR/LAX   HK 池 → HKG   JP 池 → NRT
+//   TW 池 → TPE               SG 池 → SIN           KR 池 → ICN
+// → 源里标注的机房码 = 这个 IP 实际把你送进哪个机房，逐条吻合，可直接当真值。
+//
+// 为什么它就是「网站看到的地点」：Worker 在「请求进入 CF 的那个机房」上运行（任播就近），
+//   所以直连出站就是该机房的出口（同国家/城市）；CF 托管站点直连被回环保护拦截、跌到反代兜底时，
+//   反代也按同一机房选地区（selectRelayRegion），国家一致。
+//
+// ⚠ 为什么不再用上一版「实测反代出口」写名字（那是错的，已删）：
+//   ① 出口只由请求落点决定 → 同一次订阅里所有节点写出来**完全相同**（实测 70 条全写「美国 US」）；
+//   ② 反代池本身混着别国机器：实测 proxyip.us.* 池里就有出口在 HK 的机器；
+//      proxyip.nl.* 有 13 个 IP 在黑山(ME)、proxyip.se.* 混有荷兰/俄罗斯 —— 按池抽样得出的国家不可信。
+// 无机房码的节点（内置保底 / 随机 CIDR / 自定义命名）不加后缀：没有真值就不编。
+// 格式（用户指定）：后缀 + 前后带空格的竖线；「国家 国家码 城市 机房码」。
+//   例：澳大利亚-03 | 澳大利亚 AU 悉尼 SYD
+//   例：香港-06     | 中国香港 HK 香港 HKG
+const RELAY_GEO_ZH = {
+  US: '美国', HK: '中国香港', TW: '中国台湾', MO: '中国澳门', SG: '新加坡', JP: '日本',
+  KR: '韩国', DE: '德国', SE: '瑞典', NL: '荷兰', FI: '芬兰', GB: '英国', AU: '澳大利亚',
+  CA: '加拿大', FR: '法国', PL: '波兰', CH: '瑞士', IN: '印度', BR: '巴西', RU: '俄罗斯', NZ: '新西兰'
+};
+// 港澳台在 CF 官方 PoP 表里国家字段是 CN，这里按规范写法强制归到对应地区码
+const EXIT_FORCE_CC = { HKG: 'HK', TPE: 'TW', MFM: 'MO' };
+// colo（机房码）+ cc（源里标注的国家码）→ 后缀；机房码不在表内则返回空串（不编地点）
+function geoNameSuffix(colo, cc) {
+  const c = String(colo || '').toUpperCase();
+  // 出口被归并的机房（EXIT_VIA_REGION 有收录时）：名字写实际出口地区，
+  // 与 selectRelayRegion 同源 —— 名字与「网站看到的地点」保持一致。当前表为空，不走此分支。
+  const via = EXIT_VIA_REGION[c];
+  if (via) {
+    const r = REGION_EXIT_GEO[via];
+    return r ? ' | ' + [r.zh, r.cc, r.city, r.code].join(' ') : '';
+  }
+  const g = c ? COLO_GEO[c] : null;
+  if (!g) return '';
+  const code = EXIT_FORCE_CC[c] || String(cc || '').toUpperCase() || ((g.country || '').match(/([A-Z]{2})\s*$/) || [])[1] || '';
+  const zh = (RELAY_GEO_ZH[code] || REGION_CN[code] || g.country || '').replace(/\s+[A-Z]{2}$/, '');
+  const parts = zh ? [zh] : [];
+  if (code) parts.push(code);
+  parts.push(g.city, c);
+  return ' | ' + parts.join(' ');
+}
 // PROXYIP 反代 IP 解析缓存（TTL 5 分钟：域名 → DoH TXT/A 解析结果）
 const PROXYIP_CACHE = new Map();
 
@@ -2461,6 +2923,10 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
           // 名称：优先匹配 "中文 地区码"（bestcf 格式 "地区随机 | 香港 HK"），再取纯中文段，再取地区码映射，否则留空走“优选IP-XX”兜底
           // 【新增】用户自定义名称（不含中文、不含 |）直接保留原样，例如 JP-A-147 / CF-B-163
           const rawName = (m[3] || '').trim();
+          // 地区真值：源行自带的「国家码 + 机房码」，供节点名后缀逐节点使用（取不到就不加后缀）
+          const segsGeo = (m[3] || '').split('|').map(s => s.trim());
+          const coloTag = segsGeo.find(s => /^[A-Z]{3}$/.test(s) && COLO_GEO[s]) || '';
+          const ccTag = ((m[3] || '').match(/\b([A-Z]{2})\b/) || [])[1] || '';
           if (rawName && !/[\u4e00-\u9fa5]/.test(rawName) && !rawName.includes('|')) {
             rec.push({ ip, port, name: rawName, ...(relay ? { relay: true } : {}) });
             continue;
@@ -2483,8 +2949,8 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
               }
             }
           }
-          if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...(relay ? { relay: true } : {}) }); }
-          else rec.push({ ip, port, name: '', ...(relay ? { relay: true } : {}) });
+          if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...(relay ? { relay: true } : {}), colo: coloTag, cc: ccTag }); }
+          else rec.push({ ip, port, name: '', ...(relay ? { relay: true } : {}), colo: coloTag, cc: ccTag });
         }
         if (!rec.length && allowRegionFallback) {
           // 追加模式兜底：源内无可解析 IP 时，按 URL 路径地区码（如 /HK/）用可达 CF 段生成该地区节点
@@ -2553,6 +3019,8 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
 
 async function buildNodes(cfg, cap = 800, skipSet = null) {
   const nodes = [];
+  // 本次生成：节点入口 IP → 源里标注的 { colo, cc }，供逐节点写地点后缀（_ 前缀字段不落 KV）
+  cfg._coloByIP = new Map();
   const used = new Set();
   // 订阅模式：random 随机优选（CF CIDR 随机生成指定数量，不经域名解析）
   const mode = (cfg.optimizer && cfg.optimizer.subMode) || '';
@@ -2567,7 +3035,7 @@ async function buildNodes(cfg, cap = 800, skipSet = null) {
   // 节点形态统一按 1.0.6 机制（方案 B）：所有模式端口原样单端口下发（固定 443、不随机 TLS 端口、不追加明文端口变体）
   // 测活剔除范围（方案 A）：默认模式开启测活剔除死节点；自定义订阅 / 随机优选模式不测活
   const probeSkip = (mode === 'custom' || mode === 'random');
-  const push = (server, port, name, trusted) => {
+  const push = (server, port, name, trusted, colo, cc) => {
     if (nodes.length >= cap) return;   // 生成过程限流：避免多协议膨胀超 Worker CPU
     // 入口 IP 硬性要求：非 CF 段 IP 无法转发到 Worker，直接丢弃；
     // 例外：bestcf 地区优选池的社区中转 IP（trusted 标记）可用作客户端入口（v1.0.5 修复）
@@ -2575,6 +3043,7 @@ async function buildNodes(cfg, cap = 800, skipSet = null) {
     const key = server + ':' + port;   // 按 服务器:端口 去重（单端口机制：同 IP 同端口仅下发一次）
     if (used.has(key)) return;
     used.add(key);
+    if (colo && isValidIp(server)) cfg._coloByIP.set(server, { colo, cc: cc || '' });
     const isTls = !HTTP_PORTS.has(Number(port));
     if (cfg.tlsOnly && !isTls) return;   // TLS 控制：仅下发 TLS 端口节点，明文端口跳过
     // 节点端口统一按 1.0.6 机制（方案 B）：端口原样下发（默认/自定义/随机优选均固定源端口，通常是 443），
@@ -2585,8 +3054,8 @@ async function buildNodes(cfg, cap = 800, skipSet = null) {
     if (cfg.enableXhttp && isTls) nodes.push(vlessNode(cfg, server, finalPort, name, { type: 'xhttp' }));  // XHTTP 仅 TLS 端口
   };
   // 单端口下发（1.0.6 机制，方案 B）：每个地址按源端口（通常 443）单条下发，不追加明文端口变体
-  const multiPort = (server, port, name, trusted) => {
-    push(server, Number(port) || 443, name, trusted);
+  const multiPort = (server, port, name, trusted, colo, cc) => {
+    push(server, Number(port) || 443, name, trusted, colo, cc);
   };
   if (mode === 'random') {
     let n = Math.min(Math.max(parseInt(cfg.optimizer.subRandomCount) || 16, 1), Math.min(99, cap));
@@ -2609,23 +3078,29 @@ async function buildNodes(cfg, cap = 800, skipSet = null) {
     for (const ip of randIPs) {
       if (made >= n) break;
       // 随机优选模式：按 1.0.6 机制——每个 IP 每协议仅固定 443 单端口下发，不随机 TLS 端口、不追加明文端口变体
-      if (cfg.enableVless) { nodes.push(vlessNode(cfg, ip, 443, '优选IP-' + String(made + 1).padStart(2, '0'))); made++; }
+      if (cfg.enableVless) { nodes.push(vlessNode(cfg, ip, 443, '随机优选-' + String(made + 1).padStart(2, '0'))); made++; }
       if (made >= n) break;
-      if (cfg.enableTrojan) { nodes.push(trojanNode(cfg, ip, 443, '优选IP-' + String(made + 1).padStart(2, '0'))); made++; }
+      if (cfg.enableTrojan) { nodes.push(trojanNode(cfg, ip, 443, '随机优选-' + String(made + 1).padStart(2, '0'))); made++; }
       if (made >= n) break;
-      if (cfg.enableXhttp) { nodes.push(vlessNode(cfg, ip, 443, '优选IP-' + String(made + 1).padStart(2, '0'), { type: 'xhttp' })); made++; }
+      if (cfg.enableXhttp) { nodes.push(vlessNode(cfg, ip, 443, '随机优选-' + String(made + 1).padStart(2, '0'), { type: 'xhttp' })); made++; }
     }
     return nodes;
   }
   const domains = String(cfg.preferredDomains || '').split(/[\n,;]+/).map(s => s.trim()).filter(s => s && !s.includes('://'));  // URL 数据源由 resolvePreferredDomains 解析，不作为服务器地址
-  domains.forEach((d, i) => {
-    // 支持 "IP:端口#名称" 格式：剥离 #名称 后再解析地址，名称用于节点命名（无名称时用“优选IP-XX”兜底）
+  // 兜底名按入口形态区分：域名入口 → “优选域名-XX”，IP 入口 → “优选IP-XX”（原实现对两者一律写“优选IP-XX”，
+  // 域名节点名与来源不符：用户在客户端按名字判断来源时会误判）
+  let _domIdx = 0, _ipIdx = 0;
+  domains.forEach((d) => {
+    // 支持 "IP:端口#名称" 格式：剥离 #名称 后再解析地址，名称用于节点命名（无名称时按入口形态兜底）
     const hash = d.indexOf('#');
     const addr = (hash >= 0 ? d.slice(0, hash) : d).trim();
     const nm = (hash >= 0 ? d.slice(hash + 1) : '').trim();
     const p = parseHostPort(addr, 443);
     if (p.host.startsWith('*.')) return;   // 通配符域名无法作为服务器地址，其 IP 由 resolvePreferredDomains 解析下发
-    multiPort(p.host, p.port, nm || '优选IP-' + String(i + 1).padStart(2, '0'));
+    const _fb = isValidIp(p.host)
+      ? '优选IP-' + String(++_ipIdx).padStart(2, '0')
+      : '优选域名-' + String(++_domIdx).padStart(2, '0');
+    multiPort(p.host, p.port, nm || _fb);
   });
   // 双选（IPv4+IPv6）时把 preferredIPs 重排为 v4/v6 交替：各来源 v4 天然排前，
   // 若不做交替，开启「节点数量控制 / 轮询」后 push 限流截断（cap）会先占满 v4，IPv6 被整体挤掉——
@@ -2643,7 +3118,7 @@ async function buildNodes(cfg, cap = 800, skipSet = null) {
     prefIPs = mixed;
   }
   prefIPs.forEach((x, i) => {
-    multiPort(x.ip, x.port || 443, x.name || '优选IP-' + String(i + 1).padStart(2, '0'), x.relay === true);
+    multiPort(x.ip, x.port || 443, x.name || '优选IP-' + String(i + 1).padStart(2, '0'), x.relay === true, x.colo, x.cc);
   });
   // 自定义订阅模式：仅下发用户设置节点，不兜底内置池、不做 CF 随机补足；
   // 但开启「追加内置及默认节点」(subIncludeDefault) 后需要完整下发自定义+默认+补足，因此继续走补足逻辑
@@ -2651,7 +3126,7 @@ async function buildNodes(cfg, cap = 800, skipSet = null) {
   if (!domains.length && !(cfg.preferredIPs || []).length) {
     // 无任何优选：内置优选 IP 池（开箱即用）+ 官方域名兜底（无明确地区，直接使用“优选IP-XX”名称）
     parseIPList(BUILTIN_PREFERRED_IPS.join('\n')).forEach(x => multiPort(x.ip, x.port || 443, x.name || '0'));
-    BUILTIN_OFFICIAL_DOMAINS.forEach((d, i) => multiPort(d, 443, '域名-' + String(i + 1).padStart(2, '0')));
+    BUILTIN_OFFICIAL_DOMAINS.forEach((d, i) => multiPort(d, 443, '优选域名-' + String(i + 1).padStart(2, '0')));
   }
   // CF CIDR 随机补足：节点数不足 fillCount（封顶 cap）时随机生成补齐（大量下发，客户端自动择优；对齐 1.0.6/2.0 第一版）
   // 补足候选做小范围 TCP 测活（可达排前，不足由未测活补齐），保证节点数量充足
@@ -2680,7 +3155,7 @@ async function buildNodes(cfg, cap = 800, skipSet = null) {
     for (const ip of fillIPs) {
       if (nodes.length >= cap) break;   // 补足同样受 cap 限流（与 push 一致）
       fi++;
-      multiPort(ip, 443, '优选IP-' + String(fi).padStart(3, '0'));
+      multiPort(ip, 443, '随机补足-' + String(fi).padStart(3, '0'));
     }
   }
   return nodes;
@@ -2777,9 +3252,12 @@ function filterNodes(nodes, filter) {
       const isV6 = m.host.indexOf(':') >= 0;
       if (!m.name) return false;  // 跳过无法解析的非法节点
       if (tg && !tg.some(t2 => m.up.includes(t2.toUpperCase()))) {
-        // 无地区标记的通用节点（优选IP-XX / 域名-XX / 原生地址）是 CF 通用入口，任意地区可用，不参与地区过滤；
-        // 地区过滤仅剔除明确标记为其它地区的节点，避免指定地区后节点数量骤减
-        if (!/^(优选IP|域名)-\d+/.test(m.name) && m.name !== '原生地址') return false;
+        // 无地区标记的通用节点（优选IP-XX / 优选IP-SXX / 优选域名-XX / 域名-XX / 随机补足-XXX / 随机优选-XX /
+        // 原生地址 / 内置·保底-XX）是 CF 通用入口，任意地区可用，不参与地区过滤；地区过滤仅剔除明确标记为
+        // 其它地区的节点，避免指定地区后节点数量骤减
+        // ★ 白名单必须与各处命名兜底同步：漏一个前缀，用户勾选地区后该批节点会被整批剔除（静默少节点）
+        if (!/^(优选IP(-S)?|优选域名|域名|随机补足|随机优选|内置·保底)-?\d+/.test(m.name)
+            && m.name !== '原生地址') return false;
       }
       if (t.length === 1) {
         if (t[0] === 'IPv4' && isV6) return false;
@@ -3206,19 +3684,27 @@ async function testRelayAlive(server, port, timeoutMs) {
   if (!PROBE_ALIVE_ENABLED) return true;   // 测活关闭：不剔除
   return testRelayAliveRaw(server, port, timeoutMs);
 }
+// relay（第三方 VPS 反代）测活：TCP 连通 + 拿到 websocket 升级响应即算活。
+// 【修正 2026-09-25】原实现有两个缺陷，导致这个测活在开启时恒判死、等于没有筛选能力：
+//   ① 正则 /^HTTP\/1\\.[01] (200|204)/ 写成了双反斜杠 —— JS 正则里 \\ 是字面反斜杠，
+//      于是它只匹配畸形串「HTTP/1\.1 200」这种带反斜杠的响应，真实响应一律不匹配（已实测）。
+//   ② 判据本身也不对：这类反代对不带升级头的裸 GET / 普遍返回 400，要求 200|204 会把整池判死。
+//   现改为发 websocket 升级请求（这正是客户端 vless 的真实握手动作），收到 101/400/426 即视为服务活着。
 async function testRelayAliveRaw(server, port, timeoutMs) {
   const ms = timeoutMs || 2500;
   try {
     const conn = connect({ hostname: server, port: port });
     await Promise.race([conn.opened, new Promise((_, rej) => setTimeout(() => rej(new Error('tcp timeout')), ms))]);
-    // TCP 通后发 HTTP GET /，期望 200/204（反代服务应返回任意 HTTP 响应）
     const writer = conn.writable.getWriter();
     const reader = conn.readable.getReader();
-    await writer.write(new TextEncoder().encode('GET / HTTP/1.1\r\nHost: ' + server + '\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n'));
+    await writer.write(new TextEncoder().encode(
+      'GET /?ed=2560 HTTP/1.1\r\nHost: ' + server + '\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
+      'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: binary\r\n' +
+      'User-Agent: Mozilla/5.0\r\n\r\n'));
     const chunk = await Promise.race([reader.read(), new Promise((_, rej) => setTimeout(() => rej(new Error('http timeout')), ms))]);
     try { conn.close(); } catch (e) {}
     const head = new TextDecoder().decode(chunk.value || new Uint8Array(0));
-    return /^HTTP\/1\\.[01] (200|204)/.test(head);
+    return /^HTTP\/1\.[01] (101|400|426)/.test(head);
   } catch (e) { return false; }
 }
 
@@ -3329,7 +3815,7 @@ function appendFallbackNodes(nodes, rc, cap, colo) {
 }
 
 // 根据 UA 或指定格式生成订阅
-async function generateSubscription(cfg, requestUrl, format, ua, colo) {
+async function generateSubscription(cfg, requestUrl, format, ua, colo, env) {
   // 兜底：path 为空或为 "/" 时一律回退 UUID（兼容 KV 残留旧值；Worker WS/xhttp 代理仅在 panelPath=cfg.path 处理）
   if (!cfg.path || cfg.path === '/' || cfg.path === '') cfg.path = cfg.uuid;
   // 筛选含 IPv6 时刷新官方 v6 网段（ips-v6，6 小时缓存节流；失败沿用内置/上次成功段）
@@ -3470,9 +3956,18 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
         rc.preferredIPs = [...(rc.preferredIPs || []), ...embedded];
       } else if (wantV6) {
         const embedded = builtinIPs.map(b => ({ ip: ipv4ToEmbeddedV6(b.ip), port: b.port || 443, name: b.name })).filter(b => b.ip);
-        rc.preferredIPs = [...(rc.preferredIPs || []), ...builtinIPs, ...embedded];
+        // 【优化 2026-09-25】同 IPv4 分支：内置 CF 实测池提到第三方中转池（relay 标记）之前占位
+        const _tail6 = (rc.preferredIPs || []).filter(x => x && x.relay === true);
+        const _head6 = (rc.preferredIPs || []).filter(x => !(x && x.relay === true));
+        rc.preferredIPs = [..._head6, ...builtinIPs, ...embedded, ..._tail6];
       } else {
-        rc.preferredIPs = [...(rc.preferredIPs || []), ...builtinIPs];
+        // 【优化 2026-09-25】内置 CF 实测池提到第三方中转池之前占位。
+        // 依据：cap 是先到先占（buildNodes 的 push 按插入顺序截断）。原顺序把 builtinIPs 追加在
+        // bestcf 地区中转池（relay 标记）之后 → 中转池先把名额吃满，内置池常被挤出 cap 之外。
+        // 实测（客户端侧 TCP+TLS 握手）：内置池 283/300 = 94%（前 20 条 100%），中转池仅约 70%。
+        const _tail = (rc.preferredIPs || []).filter(x => x && x.relay === true);
+        const _head = (rc.preferredIPs || []).filter(x => !(x && x.relay === true));
+        rc.preferredIPs = [..._head, ...builtinIPs, ..._tail];
       }
     }
     // 地址来源全部关闭时兜底内置优选池，保证订阅永不为空（客户端不会收到「无效订阅」）；单选 IPv6 时同样转 embedded
@@ -3510,10 +4005,10 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
       const previouslyIssued = resolved.filter(x => skipSet.has(x.ip));
       fresh = [...unissued, ...previouslyIssued];
     }
-    // 统一名称：域名池/数据源自动解析且无法确定地区的节点（"域名.xx-NN" 格式）改为“优选IP-XX”，避免长域名占据节点名；
+    // 统一名称：域名池/数据源自动解析且无法确定地区的节点（"域名.xx-NN" 格式）改为“优选域名-XX”，避免长域名占据节点名；
     // 能确定地区的（如优选 API 源 /HK/ → “香港-XX”）、用户自定义名称（如 JP-A-147）与面板手动填写的名称保留不变
     const nameBase = (rc.preferredIPs || []).length;
-    fresh = fresh.map((x, i) => (/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}-\d+$/.test(x.name || '')) ? Object.assign({}, x, { name: '优选IP-' + String(nameBase + i + 1).padStart(2, '0') }) : x);
+    fresh = fresh.map((x, i) => (/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}-\d+$/.test(x.name || '')) ? Object.assign({}, x, { name: '优选域名-' + String(nameBase + i + 1).padStart(2, '0') }) : x);
     rc.preferredIPs = [...(rc.preferredIPs || []), ...fresh];
   }
   // 仅勾选 IPv6 时：resolved（地区筛选解析）在首次过滤之后才并入，此处二次过滤保证纯 v6（数量控制下不被 v4 挤占）
@@ -3592,12 +4087,29 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo) {
       for (const ip of fillIPs) {
         if (nodes.length >= cap) break;
         fi++;
-        pushFill(ip, 443, '优选IP-' + String(fi).padStart(3, '0'));
+        pushFill(ip, 443, '随机补足-' + String(fi).padStart(3, '0'));
       }
     }
   }
   // 严格封顶：多协议膨胀可能越过 cap 一个 IP（3 条），统一截断到上限；节点数量控制开启时同样按设定值精确截断
   if (nodes.length > cap) nodes.length = cap;
+  // 节点命名：逐节点在链接末尾追加「地点」后缀（按各自源里的机房码；无机房码的节点不加）。
+  // 放在所有追加/截断之后，避免影响 filterNodes 的地区标记判定（它跑在改名之前）。
+  // 关闭开关：环境变量 RELAY_EXIT_PROBE=0（沿用旧开关名，现在表示「不写地点后缀」）。
+  if (!cfg._noExitProbe) {
+    const _coloMap = rc._coloByIP;   // rc = Object.assign({}, cfg) 浅拷贝，buildNodes 写在 rc 上
+    if (_coloMap && _coloMap.size) {
+      for (let i = 0; i < nodes.length; i++) {
+        if (nodes[i].indexOf('#') <= 0) continue;
+        let _host = '';
+        try { _host = parseNodeServer(nodes[i]).host; } catch (e) { continue; }
+        const _meta = _host ? _coloMap.get(_host) : null;
+        if (!_meta) continue;
+        const _sfx = geoNameSuffix(_meta.colo, _meta.cc);
+        if (_sfx) nodes[i] += uriFragName(_sfx);
+      }
+    }
+  }
   // 收集本次下发的所有 IP 型节点地址（排除域名），记录到 KV issued 供下次去重
   const issuedIPs = [];
   const seenIssued = new Set();
@@ -5323,7 +5835,7 @@ async function handleRequest(request, env) {
           }
         } catch (e) { /* 监控失败不阻断订阅 */ }
       }
-      const sub = await generateSubscription(subCfg, request.url, fmt, UA, request.cf && request.cf.colo);
+      const sub = await generateSubscription(subCfg, request.url, fmt, UA, request.cf && request.cf.colo, env);
       if (cfg.polling !== false && env.K && typeof env.K.put === 'function' && sub.issued && sub.issued.length) {
         // 滑动窗口历史队列：合并历史与本次已下发 IP，去重后保留最近 200 条（新 IP 优先保留），
         // 既实现客户端定期换新 IP，又避免集合无限增长或清空引起数量塌陷
