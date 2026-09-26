@@ -971,7 +971,7 @@ function invalidateConfigCache(env) { if (env.K) CONFIG_CACHE.delete(env.K); }
 function publicConfig(cfg, env) {
   const out = JSON.parse(JSON.stringify(cfg, (key, value) => key.startsWith('_') ? undefined : value));
   out.secretConfigured = {};
-  for (const key of PRIVATE_FIELDS) { out.secretConfigured[key] = Boolean(cfg[key]); out[key] = ''; }
+  for (const key of PRIVATE_FIELDS) { out.secretConfigured[key] = Boolean(cfg[key]); out[key] = key === 'outboundProxy' ? cfg[key] : ''; }
   out.lockedFields = [...new Set(Object.entries(ENV_FIELDS).filter(([k]) => env[k] !== undefined && env[k] !== '').map(([, v]) => v))];
   out.version = VERSION;
   return out;
@@ -2300,25 +2300,12 @@ async function openOutbound(parsed, cfg, colo, isVless) {
       ? (t) => connectViaShadowsocks(proxy, t)
       : (t) => connectViaSocks5(proxy, t)) : null;
 
-  if(mode==='only'){if(!viaProxy)throw new AppError(503,'仅代理模式缺少出站代理');return viaProxy({hostname:parsed.addr,port:parsed.port});}
-  const buildAttempts = (target, timeoutMs) => {
-    const attempts = [];
-    if (mode === 'only') {
-      attempts.push(viaProxy ? () => viaProxy(target) : () => connectDirect(target, timeoutMs));
-    } else if (mode === 'no') {
-      attempts.push(() => connectDirect(target, timeoutMs));
-      if (viaProxy) attempts.push(() => viaProxy(target));
-    } else {
-      if (viaProxy) attempts.push(() => viaProxy(target));
-      attempts.push(() => connectDirect(target, timeoutMs));
-    }
-    return attempts;
-  };
-
+  const destination = {hostname:parsed.addr,port:parsed.port};
+  if(mode==='only'){if(!viaProxy)throw new AppError(503,'仅代理模式缺少出站代理');return viaProxy(destination);}
   let lastErr, attemptsMade=0;
   const deadline=Date.now()+15000;
-  const tryConnect = async (target, timeoutMs) => {
-    for (const fn of buildAttempts(target, timeoutMs)) {
+  const tryConnect = async (attempts) => {
+    for (const fn of attempts) {
       if(attemptsMade++>=4 || Date.now()>=deadline)throw new AppError(504,'出站重试预算耗尽');
       let expired=false;
       const job=fn().then(socket=>{if(expired){closeSocket(socket);throw new Error('出站连接过期');}return socket;});
@@ -2328,22 +2315,34 @@ async function openOutbound(parsed, cfg, colo, isVless) {
     return null;
   };
 
-  // 1) 用户自定义 proxyIP 透明代理：填了「反代/落地 IP」就优先走它作为固定出口，失败再回退直连；
-  //    留空则整块跳过、行为不变。这是"临时切落地"开关：填什么落地=走什么落地，清空=恢复直连。
+  // 出站模式只决定真实目标的代理/直连顺序；透明反代必须直接连接，
+  // 否则代理会连到反代地址，代理成功也无法保证由代理本身出站。
+  if (viaProxy) {
+    const attempts = mode === 'no'
+      ? [() => connectDirect(destination,6000), () => viaProxy(destination)]
+      : [() => viaProxy(destination), () => connectDirect(destination,6000)];
+    const connected = await tryConnect(attempts);
+    if (connected) return connected;
+  }
+
+  // 1) 用户自定义 proxyIP 透明代理：无出站代理时优先尝试；
+  //    有出站代理时，在代理和目标直连均失败后尝试。
   const relay = cfg.proxyIP ? parseHostPort(cfg.proxyIP, 443) : null;
   if (relay && relay.host) {
     let customTargets = await resolveProxyIPs(relay.host, relay.port, cfg._io);
     if (!customTargets.length) customTargets = [{ hostname: relay.host, port: relay.port }];
     for (const target of customTargets) {
-      const r = await tryConnect(target, 6000);
+      const r = await tryConnect([() => connectDirect(target,6000)]);
       if (r) return r;
     }
   }
 
-  // 2) 直连目标（非 CF 网站直连可用；CF 网站回环保护会失败）
+  // 2) 未配置出站代理时直连目标（已配置时在上方按模式尝试过）
   //    6s 连接超时：目标 SYN 被丢弃 / 直连被回环保护拦截时不再无限挂起，及时进入反代兜底
-  const directResult = await tryConnect({ hostname: parsed.addr, port: parsed.port }, 6000);
-  if (directResult) return directResult;
+  if (!viaProxy) {
+    const directResult = await tryConnect([() => connectDirect(destination,6000)]);
+    if (directResult) return directResult;
+  }
 
   // 3) 兜底内置地区反代（透明代理：发送去掉 VLESS/Trojan 头部的原始 TLS 数据，对端按 SNI 路由到目标）
   //    多地区轮询：本地区域优先，失败后依次尝试其余区域；单个反代失效不再导致
@@ -2359,7 +2358,7 @@ async function openOutbound(parsed, cfg, colo, isVless) {
       try { relayTargets = await resolveProxyIPs(relayDomain, 443, cfg._io); } catch (e) { /* 忽略 */ }
       if (!relayTargets.length) continue;
       for (const target of relayTargets) {
-        const r = await tryConnect(target, 5000);
+        const r = await tryConnect([() => connectDirect(target,5000)]);
         if (r) return r;
       }
     }
@@ -4424,7 +4423,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
           <div class="proto-row"><label class="switch"><input type="checkbox" id="en-vless" checked><span class="sl"></span></label><span>VLESS 协议（默认开启）</span></div>
           <div class="proto-row"><label class="switch"><input type="checkbox" id="en-trojan"><span class="sl"></span></label><span>Trojan 协议（支持Mihomo内核）</span></div>
           <div class="proto-row"><label class="switch"><input type="checkbox" id="en-xhttp"><span class="sl"></span></label><span>XHTTP 协议（支持Mihomo内核，须绑定自定义域名并开启gRPC）</span></div>
-          <div class="field" style="margin-top:12px"><label>Trojan 密码（留空使用 UUID）</label><input type="text" id="tp-pass" placeholder="Trojan 密码" autocomplete="off"></div>
+          <div class="field" style="margin-top:12px"><label>Trojan 密码（留空使用 UUID）</label><input type="text" id="tp-pass" placeholder="Trojan 密码" autocomplete="off" oninput="onSecretInput('tp-pass')"><input type="hidden" id="tp-pass-clear" value=""><button type="button" class="btn sm" id="tp-pass-clear-btn" onclick="clearSecret('tp-pass')" style="margin-top:8px">清除已保存密码（保存后生效）</button></div>
         </div>
         <div class="card">
           <h3><span class="tick"></span>TLS 与传输</h3>
@@ -4449,8 +4448,8 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
       </div>
       <div class="card">
         <h3><span class="tick"></span>落地与出站</h3>
-        <div class="field"><label>反代 / 落地 IP（填写后作为固定出口优先使用；留空则直连失败后由内置地区反代兜底，格式 host 或 host:port）</label><input type="text" id="s-proxyIP" placeholder="留空则直连失败后走内置地区反代" autocomplete="off"></div>
-        <div class="field"><label>出站代理（可选）</label><input type="text" id="s-outbound" placeholder="socks5://user:pass@1.2.3.4:1080 或 ss://chacha20-ietf-poly1305:密码@1.2.3.4:8388" autocomplete="off"></div>
+        <div class="field"><label>反代 / 落地 IP（无出站代理时优先使用；有出站代理时作为代理和直连失败后的兜底，格式 host 或 host:port）</label><input type="text" id="s-proxyIP" placeholder="留空则直连失败后走内置地区反代" autocomplete="off"></div>
+        <div class="field"><label>出站代理（可选）</label><input type="text" id="s-outbound" placeholder="socks5://user:pass@1.2.3.4:1080 或 ss://chacha20-ietf-poly1305:密码@1.2.3.4:8388" autocomplete="off" oninput="onOutboundInput()"><input type="hidden" id="s-outbound-clear" value=""><button type="button" class="btn sm" id="s-outbound-clear-btn" onclick="clearOutboundProxy()" style="margin-top:8px">清除现有出站代理（保存后生效）</button></div>
         <p class="hint">支持 socks5://（可带 user:pass@）、http(s)://、ss:// 或 host:port（默认按 socks5，端口 1080）。SS 加密支持 aes-128-gcm / aes-256-gcm / chacha20-ietf-poly1305。</p>
         <div class="field" style="margin-bottom:0"><label>出站方式</label>
           <select id="s-outmode">
@@ -4616,7 +4615,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
         </div>
         <div class="field"><label>面板路径（访问入口，留空用 UUID）</label><input type="text" id="a-path" placeholder="留空自动使用 UUID" autocomplete="off"></div>
         <div class="field"><label>自定义订阅别名（如 AAZ；留空使用令牌路径）</label><input type="text" id="a-suburl" placeholder="AAZ" autocomplete="off"></div>
-        <div class="field"><label>管理密码（留空保留已配置密码）</label><input type="password" id="a-admin" placeholder="设置后访问面板需登录" autocomplete="new-password"></div>
+        <div class="field"><label>管理密码（至少 8 位，留空保留已配置密码）</label><input type="password" id="a-admin" placeholder="设置后访问面板需登录" autocomplete="new-password"></div>
         <div class="field" style="margin-bottom:0"><label>绑定域名（留空使用当前访问域名）</label><input type="text" id="a-host" placeholder="node.example.com" autocomplete="off"></div>
         <p class="hint" style="margin-top:10px">「绑定域名」用于订阅节点的 SNI/Host，不负责域名解析。请先在 Cloudflare 对应 Pages 或 Worker 项目绑定域名并确认有效证书。留空使用当前访问域名。未绑定 KV K 时不能保存配置；环境变量优先于面板配置。</p>
       </div>
@@ -4624,7 +4623,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
         <h3><span class="tick"></span>Cloudflare 监控选项（可选）</h3>
         <div class="grid2">
           <div class="field" style="margin:0"><label>账户 ID（Account Tag）</label><input type="text" id="a-cfid" placeholder="32 位十六进制 ID，位于 dash.cloudflare.com 右侧栏「账户 ID」" autocomplete="off"></div>
-          <div class="field" style="margin:0"><label>API 令牌（Bearer）</label><input type="password" id="a-cftoken" placeholder="40 位令牌（My Profile → API Tokens 创建）" autocomplete="new-password"></div>
+          <div class="field" style="margin:0"><label>API 令牌（Bearer）</label><input type="password" id="a-cftoken" placeholder="40 位令牌（My Profile → API Tokens 创建）" autocomplete="new-password" oninput="onSecretInput('a-cftoken')"><input type="hidden" id="a-cftoken-clear" value=""><button type="button" class="btn sm" id="a-cftoken-clear-btn" onclick="clearSecret('a-cftoken')" style="margin-top:8px">清除已保存令牌（保存后生效）</button></div>
         </div>
         <p class="hint" style="margin-top:10px">账户 ID 是 32 位十六进制字符串（<b>不是邮箱</b>），打开并登录Cloudflare账户后，点击「左侧栏」→「管理账户」→「帐户 API 令牌」→「创建令牌」。查询失败提示 401 时请检查这两项是否填错。</p>
       </div>
@@ -5105,7 +5104,7 @@ function fillForm(){
   $('a-host').value = CFG.host || '';
   $('a-cfid').value = CFG.cfAccountId || '';
   $('a-cftoken').value = CFG.cfApiToken || '';
-  [['a-admin','admin'],['a-cftoken','cfApiToken'],['s-outbound','outboundProxy'],['tp-pass','trojanPassword']].forEach(function(pair){var el=$(pair[0]);if(pair[1]!=='admin'&&!$(pair[0]+'-clear')){var label=document.createElement('label');var box=document.createElement('input');box.type='checkbox';box.style.width='auto';box.id=pair[0]+'-clear';label.append(box,document.createTextNode(' 清空已保存凭据（保存后生效）'));el.insertAdjacentElement('afterend',label);}var clear=$(pair[0]+'-clear');if(clear){clear.checked=false;clear.disabled=(CFG.lockedFields||[]).includes(pair[1]);}el.placeholder=CFG.secretConfigured&&CFG.secretConfigured[pair[1]]?'已配置，留空保留；输入新值替换':'尚未配置';el.disabled=(CFG.lockedFields||[]).includes(pair[1]);});
+  [['a-admin','admin'],['a-cftoken','cfApiToken'],['s-outbound','outboundProxy'],['tp-pass','trojanPassword']].forEach(function(pair){var el=$(pair[0]);var locked=(CFG.lockedFields||[]).includes(pair[1]);var clear=$(pair[0]+'-clear');if(clear){clear.value='';$(pair[0]+'-clear-btn').disabled=locked || !(CFG.secretConfigured&&CFG.secretConfigured[pair[1]]);}el.placeholder=CFG.secretConfigured&&CFG.secretConfigured[pair[1]]?'已配置，留空保留；输入新值替换':'尚未配置';el.disabled=locked;});
   [['a-uuid','uuid'],['a-path','path']].forEach(function(pair){$(pair[0]).disabled=(CFG.lockedFields||[]).includes(pair[1]);});
   $('s-proxyIP').value = CFG.proxyIP || '';
   $('s-outbound').value = CFG.outboundProxy || '';
@@ -5115,6 +5114,15 @@ function fillForm(){
   onSubMode();
   $('o-customWrap').style.display = ($('o-source').value === 'custom') ? '' : 'none';
 }
+function onSecretInput(id){ $(id+'-clear').value=''; $(id+'-clear-btn').disabled=false; }
+function clearSecret(id){
+  $(id).value='';
+  $(id+'-clear').value='1';
+  $(id+'-clear-btn').disabled=true;
+  markDirty();
+}
+function onOutboundInput(){ onSecretInput('s-outbound'); }
+function clearOutboundProxy(){ clearSecret('s-outbound'); }
 // 节点地区多选互斥：勾选具体地区时取消「全部地区」；全部取消时自动恢复「全部地区」（保证筛选非空）
 function bindRegionPills(){
   if (window.__regionPillsBound) return;
@@ -5152,7 +5160,7 @@ function collectForm(){
     path: $('a-path').value.trim() || $('a-uuid').value.trim(),
     subUrl: $('a-suburl').value.trim(),
     admin: $('a-admin').value,
-    clearSecrets: [['a-cftoken','cfApiToken'],['s-outbound','outboundProxy'],['tp-pass','trojanPassword']].filter(function(p){return $(p[0]+'-clear')&&$(p[0]+'-clear').checked;}).map(function(p){return p[1];}),
+    clearSecrets: [['a-cftoken','cfApiToken'],['s-outbound','outboundProxy'],['tp-pass','trojanPassword']].filter(function(p){return $(p[0]+'-clear')&&$(p[0]+'-clear').value==='1';}).map(function(p){return p[1];}),
     host: $('a-host').value.trim(),
     alpn: $('alpn').value,
     ech: $('ech-on').checked,
@@ -5747,7 +5755,7 @@ async function handleRequest(request,env){
     }
     merged.optimizer={...cfg.optimizer,...(body.optimizer||{})};
     if(body.optimizer&&typeof body.optimizer!=='object')throw new AppError(400,'优选配置错误');
-    if(merged.admin&&merged.admin.length<12)throw new AppError(400,'管理密码至少需要 12 个字符');
+    if(merged.admin&&merged.admin.length<8)throw new AppError(400,'管理密码至少需要 8 个字符');
     await saveConfig(env,merged);
     const fresh=await loadConfig(env);
     return json({ok:true,data:publicConfig(fresh,env),msg:'配置已保存；其他地区可能稍后更新',next:'/'+fresh.path});
