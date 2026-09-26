@@ -24,7 +24,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.0.4';
+const VERSION = '2.0.5';
 
 const DEPLOY_EDITION = '明文版';
 function deployKind() { return 'plain'; }
@@ -482,7 +482,7 @@ function isTrustedRegionPool(url) {
 
 const DEFAULT_CONFIG = {
   uuid: '',
-  path: '',            // 自定义路径，留空用 UUID
+  path: '',            // 管理面板路径，留空用 UUID；代理路径始终使用 UUID
   admin: '',
   host: '',
   // 协议开关
@@ -2743,6 +2743,9 @@ function uriFragName(name) {
   return String(name).replace(/%/g, '%25').replace(/#/g, '%23').replace(/\?/g, '%3F').replace(/ /g, '%20');
 }
 
+// 代理入口固定由 UUID 决定，D / PATH / 面板路径设置只影响管理入口。
+function proxyPath(cfg) { return '/' + cfg.uuid; }
+
 function vlessNode(cfg, server, port, name, extra = {}) {
   const host = cfg.host;
   const addr = server.includes(':') && !server.startsWith('[') ? `[${server}]` : server;  // IPv6 需方括号
@@ -2759,7 +2762,7 @@ function vlessNode(cfg, server, port, name, extra = {}) {
     q += '&extra=' + enc(JSON.stringify(xhttpPadding(cfg)));
   }
   else q += '&type=ws';   // 明文端口与默认路径均走 ws
-  q += '&path=' + enc('/' + cfg.path);
+  q += '&path=' + enc(proxyPath(cfg));
   if (cfg.alpn) q += '&alpn=' + enc(cfg.alpn);
   if (cfg.ech) {
     // ECH：输出 "查询域名+DoH"（xray/V2rayN 客户端本地查询 ECH 配置，Worker 端拉取会与用户边缘密钥不匹配导致握手失败）
@@ -2776,8 +2779,8 @@ function trojanNode(cfg, server, port, name) {
   // 明文端口（80/8080/8880/2052/2082/2086/2095）：走 security=none 明文 ws（不被 TLS 指纹检测，可用性高）；
   // TLS 端口：security=tls + sni/fp
   let q = isTls
-    ? 'security=tls&sni=' + enc(host) + '&fp=chrome&host=' + enc(host) + '&type=ws&path=' + enc('/' + cfg.path)
-    : 'security=none&host=' + enc(host) + '&type=ws&path=' + enc('/' + cfg.path);
+    ? 'security=tls&sni=' + enc(host) + '&fp=chrome&host=' + enc(host) + '&type=ws&path=' + enc(proxyPath(cfg))
+    : 'security=none&host=' + enc(host) + '&type=ws&path=' + enc(proxyPath(cfg));
   if (cfg.alpn && isTls) q += '&alpn=' + enc(cfg.alpn);
   if (cfg.ech && isTls) q += '&ech=' + enc((cfg.echHost || 'cloudflare-ech.com') + '+' + (cfg.echDns || 'https://223.5.5.5/dns-query'));   // ECH：仅 TLS 端口有效
   return `trojan://${cfg.trojanPassword || cfg.uuid}@${addr}:${port}?${q}#${uriFragName(name)}`;
@@ -3389,7 +3392,7 @@ function clashProxyYaml(p) {
 }
 function generateClash(cfg, nodes) {
   const host = cfg.host;
-  const path = '/' + cfg.path;
+  const path = proxyPath(cfg);
   const seen = new Set();
   // XHTTP 节点按 mihomo xhttp-opts 规范输出（含 x-padding 混淆参数），与 WS/Trojan 一并下发
   const proxies = nodes.map((n) => {
@@ -3451,7 +3454,7 @@ ${CLASH_TEMPLATE}
 // 将 VLESS TLS 节点转换为 Trojan（密码=UUID，TLS/WS 参数一致），XHTTP 与明文端口节点过滤，
 // 输出 Surge 风格配置（[General]/[Proxy]/[Proxy Group]/[Rule]），Surfboard 直接导入
 function generateSurfboard(cfg, nodes) {
-  const host = cfg.host, path = '/' + cfg.path;
+  const host = cfg.host, path = proxyPath(cfg);
   if (!cfg.enableTrojan) throw new AppError(400, 'Surfboard 需要先启用 Trojan');
   const sb = [];
   for (const n of nodes) {
@@ -3485,7 +3488,7 @@ FINAL,🐟 漏网之鱼
 // ---------- Sing-box JSON ----------
 function generateSingbox(cfg, nodes) {
   const host = cfg.host;
-  const path = '/' + cfg.path;
+  const path = proxyPath(cfg);
   const outbounds = nodes.map((n, i) => {
     const { user, srv, prt, name, isTrojan, tls } = parseShareNode(n, i);
     const type = getParam(n, 'type') || 'ws';
@@ -3590,7 +3593,7 @@ function generateSingbox(cfg, nodes) {
 
 // ---------- Surge ----------
 function generateSurge(cfg, nodes) {
-  const host = cfg.host, path = '/' + cfg.path;
+  const host = cfg.host, path = proxyPath(cfg);
   const proxies = nodes.map((n, i) => {
     const { user, srv, prt, name, isTrojan, tls } = parseShareNode(n, i);
     const tlsPart = tls ? ', tls=true, skip-cert-verify=false, sni=' + host : ', tls=false';
@@ -3619,7 +3622,7 @@ FINAL,🐟 漏网之鱼
 
 // ---------- Loon ----------
 function generateLoon(cfg, nodes) {
-  const host = cfg.host, path = '/' + cfg.path;
+  const host = cfg.host, path = proxyPath(cfg);
   const proxies = nodes.map((n, i) => {
     const { user, srv, prt, name, isTrojan, tls } = parseShareNode(n, i);
     const tlsPart = tls ? ', tls=true, skip-cert-verify=false, sni=' + host : ', tls=false';
@@ -3647,7 +3650,7 @@ FINAL,🐟 漏网之鱼
 
 // ---------- Quantumult X ----------
 function generateQuanX(cfg, nodes) {
-  const host = cfg.host, path = '/' + cfg.path;
+  const host = cfg.host, path = proxyPath(cfg);
   // QuanX 的 ip:port 格式中 IPv6 必须带方括号（裸 v6 与端口冒号歧义）
   const qxHost = (srv) => srv.indexOf(':') >= 0 ? '[' + srv + ']' : srv;
   const servers = nodes.map((n, i) => {
@@ -3807,8 +3810,6 @@ function appendFallbackNodes(nodes, rc, cap, colo) {
 
 // 根据 UA 或指定格式生成订阅
 async function generateSubscription(cfg, requestUrl, format, ua, colo, env) {
-  // 兜底：path 为空或为 "/" 时一律回退 UUID（兼容 KV 残留旧值；Worker WS/xhttp 代理仅在 panelPath=cfg.path 处理）
-  if (!cfg.path || cfg.path === '/' || cfg.path === '') cfg.path = cfg.uuid;
   // 筛选含 IPv6 时刷新官方 v6 网段（ips-v6，6 小时缓存节流；失败沿用内置/上次成功段）
   const _ipT0 = (cfg.filter && cfg.filter.ipType) || [];
   if (_ipT0.includes('IPv6')) await refreshOfficialV6CIDRs(cfg._io);
@@ -5748,6 +5749,7 @@ async function handleRequest(request,env){
   if(request.method==='POST'&&!sameOrigin(request))return json({ok:false,msg:'来源不匹配'},403);
   const cfg=await loadConfig(env);
   const isManagement=segs[0]===cfg.path;
+  const isProxy=path===cfg.uuid;
   const authenticated=()=>requireAuth(request,cfg);
   if(path==='') {
     if(await authenticated())return Response.redirect(new URL('/'+cfg.path,url).href,302);
@@ -5766,11 +5768,11 @@ async function handleRequest(request,env){
     return new Response(JSON.stringify({ok:true,next:safeNext(params.get('next'),cfg)}),{headers:{'Content-Type':'application/json','Cache-Control':'no-store','Set-Cookie':'luma_auth='+await createSession(cfg)+'; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Strict'}});
   }
   const upgrade=(request.headers.get('Upgrade')||'').toLowerCase();
-  if(isManagement&&segs.length===1&&upgrade==='websocket'){
+  if(isProxy&&upgrade==='websocket'){
     if(!cfg.enableVless&&!cfg.enableTrojan)throw new AppError(403,'WebSocket 协议已关闭');
     return handleWebSocketProxy(request,cfg);
   }
-  if(isManagement&&segs.length===1&&request.method==='POST'){
+  if(isProxy&&request.method==='POST'){
     if(!cfg.enableXhttp)throw new AppError(403,'XHTTP 已关闭');
     return handleXhttpProxy(request,cfg);
   }
