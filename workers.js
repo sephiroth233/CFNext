@@ -24,7 +24,7 @@
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.0.1';
+const VERSION = '2.0.2';
 
 const DEPLOY_EDITION = '明文版';
 function deployKind() { return 'plain'; }
@@ -4031,12 +4031,51 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo, env) {
 // ---------------------------------------------------------------------------
 // 管理面板 HTML（单页应用）
 // ---------------------------------------------------------------------------
+// 两个页面共用主题控制器：首次渲染前读取偏好，未选择时跟随系统。
+const THEME_SCRIPT = String.raw`<script>
+(function(){
+  var media = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+  var mode = 'auto';
+  function readMode(){
+    var saved;
+    try { saved = localStorage.getItem('tp_theme'); } catch(e) {}
+    return saved === 'light' || saved === 'dark' ? saved : 'auto';
+  }
+  function apply(){
+    var resolved = mode === 'auto' ? (media && media.matches ? 'dark' : 'light') : mode;
+    document.documentElement.setAttribute('data-theme', resolved);
+    document.documentElement.style.colorScheme = resolved;
+    window.dispatchEvent(new Event('cf-theme-change'));
+  }
+  mode = readMode();
+  window.cfTheme = {
+    get: function(){ return mode; },
+    apply: apply,
+    set: function(value){
+      mode = value === 'light' || value === 'dark' ? value : 'auto';
+      try { localStorage.setItem('tp_theme', mode); } catch(e) {}
+      apply();
+    }
+  };
+  if (media) {
+    var onSystemChange = function(){ if (mode === 'auto') apply(); };
+    if (media.addEventListener) media.addEventListener('change', onSystemChange);
+    else if (media.addListener) media.addListener(onSystemChange);
+  }
+  window.addEventListener('storage', function(event){
+    if (event.key === 'tp_theme' || event.key === null) { mode = readMode(); apply(); }
+  });
+  apply();
+})();
+</script>`;
+
 const PANEL_HTML = String.raw`
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+${THEME_SCRIPT}
 <title>CFNext · Cloudflare 隧道面板</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='3' width='18' height='18' rx='5' fill='%23f6821f'/%3E%3Cpath d='M8 15V9l8 6V9' stroke='%230d131b' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
@@ -4262,7 +4301,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
     <button class="icon-btn hamb" id="hamb" title="菜单"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
     <h1 id="pageTitle">仪表盘</h1>
     <span class="pill" id="connPill"><span class="dot"></span><span id="connText">连接中</span></span>
-    <button class="icon-btn" id="themeBtn" title="切换日间 / 夜间"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path id="themeIcon" d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
+    <button class="icon-btn" id="themeBtn" title="主题：跟随系统；点击切换为日间" aria-label="主题：跟随系统；点击切换为日间"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path id="themeIcon" d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
   </div>
   <div class="wdwarn" id="wdwarn">当前运行在 *.workers.dev 域名上：订阅与节点下发功能正常；若遇连接不稳或访问受限，建议在 Cloudflare 面板绑定自定义域名后使用。</div>
 
@@ -4754,31 +4793,31 @@ function switchView(id){
 $('hamb').addEventListener('click', function(){ $('sidebar').classList.toggle('open'); });
 
 /* ===== 主题 ===== */
-function systemIsLight(){ return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches; }
-function storedTheme(){ var t = 'dark'; try { t = localStorage.getItem('tp_theme') || 'dark'; } catch(e) {} return t; }
-function resolveTheme(t){ if (t === 'auto') return systemIsLight() ? 'light' : 'dark'; return t; }
+function storedTheme(){ return window.cfTheme.get(); }
 function setThemeIcon(t){
   var p = document.getElementById('themeIcon');
   if (!p) return;
   if (t === 'light') p.setAttribute('d', 'M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10zM12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4');
   else p.setAttribute('d', 'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z');
 }
-function applyTheme(){
-  var t = resolveTheme(storedTheme());
-  document.documentElement.setAttribute('data-theme', t);
-  setThemeIcon(t);
+function updateThemeButton(){
+  setThemeIcon(document.documentElement.getAttribute('data-theme'));
+  var mode = storedTheme();
+  var labels = {auto:'跟随系统',light:'日间',dark:'夜间'};
+  var next = {auto:'light',light:'dark',dark:'auto'}[mode];
+  var label = '主题：' + labels[mode] + '；点击切换为' + labels[next];
+  $('themeBtn').title = label;
+  $('themeBtn').setAttribute('aria-label', label);
 }
 function setTheme(t){
-  try { localStorage.setItem('tp_theme', t); } catch(e) {}
-  applyTheme();
+  window.cfTheme.set(t);
   toast(t === 'auto' ? '已切换为跟随系统' : (t === 'light' ? '已切换为日间模式' : '已切换为夜间模式'), 'ok');
 }
 $('themeBtn').addEventListener('click', function(){
-  var cur = storedTheme();
-  var next = (cur === 'light') ? 'dark' : 'light';
-  setTheme(next);
+  setTheme({auto:'light',light:'dark',dark:'auto'}[storedTheme()]);
 });
-applyTheme();
+window.addEventListener('cf-theme-change', updateThemeButton);
+updateThemeButton();
 
 /* ===== 更新检测 ===== */
 var topVerText = 'v—';
@@ -5543,10 +5582,11 @@ loadAll();
 // ---------------------------------------------------------------------------
 const loginHTML = `
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+${THEME_SCRIPT}
 <title>CFNext · 登录</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='3' width='18' height='18' rx='5' fill='%23f6821f'/%3E%3Cpath d='M8 15V9l8 6V9' stroke='%230d131b' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
@@ -5591,12 +5631,6 @@ button:disabled{opacity:.6;cursor:not-allowed}
 </div>
 <script>
 (function(){
-  var t = 'dark';
-  try { t = localStorage.getItem('tp_theme') || 'dark'; } catch(e) {}
-  var resolved = t === 'auto'
-    ? (window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
-    : t;
-  document.documentElement.setAttribute('data-theme', resolved);
   var next = new URLSearchParams(location.search).get('next') || '/';
   document.getElementById('form').addEventListener('submit', function(e){
     e.preventDefault();

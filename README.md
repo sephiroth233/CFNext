@@ -1,8 +1,12 @@
-# CFNext 2.0.1
+# CFNext 2.0.2
 
 Cloudflare Workers / Pages 单文件代理与订阅管理面板。仓库主脚本为 `workers.js`，保留 VLESS over WebSocket、Trojan over WebSocket、VLESS XHTTP，以及 SOCKS5、HTTP/HTTPS CONNECT、Shadowsocks AEAD 出站。当前实现仅转发 TCP；客户端应使用本地 DNS 或 DoH，不支持通用 UDP 转发。
 
 本次修复对应已有的 **Pages 项目 `cfnext`**。2.0.1 已于 2026-09-26 发布到生产环境，发布记录见文末。
+
+## 2.0.2 主题行为
+
+登录页与管理面板默认跟随系统的浅色/深色设置，并在系统主题变化时自动更新。主题在页面首次绘制前初始化，避免先显示深色再切换。管理面板右上角按钮按「跟随系统 → 日间 → 夜间 → 跟随系统」循环；手动选择保存在当前浏览器，登录页与其他同站标签页同步。已有手动偏好继续保留，可通过按钮恢复跟随系统。
 
 ## 从 2.0 升级
 
