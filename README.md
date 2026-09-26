@@ -2,7 +2,7 @@
 
 Cloudflare Workers / Pages 单文件代理与订阅管理面板。仓库主脚本为 `workers.js`，保留 VLESS over WebSocket、Trojan over WebSocket、VLESS XHTTP，以及 SOCKS5、HTTP/HTTPS CONNECT、Shadowsocks AEAD 出站。当前实现仅转发 TCP；客户端应使用本地 DNS 或 DoH，不支持通用 UDP 转发。
 
-本次修复对应已有的 **Pages 项目 `cfnext`**。本地修复和测试不会自动更新线上部署。
+本次修复对应已有的 **Pages 项目 `cfnext`**。2.0.1 已于 2026-09-26 发布到生产环境，发布记录见文末。
 
 ## 从 2.0 升级
 
@@ -103,6 +103,19 @@ Cloudflare 禁止 TCP sockets 直连 Cloudflare IP 段。因此云端跳过这�
 
 已完成：29 项功能/安全检查、5 组独立协议测试、11 项 workerd 检查，以及浏览器登录、保存、订阅预览验证。外部来源使用测试替身，测试未携带生产凭据。
 
-尚需在预览部署验证：真实客户端的 VLESS/Trojan/XHTTP 双向流、真实出站代理握手、长连接取消、慢客户端、高并发 CPU/内存与错误率、各客户端配置解析及 Analytics 账户权限/字段兼容。测试通过不代表这些生产链路已验证；本次没有发布到线上。
+尚需在预览部署验证：真实客户端的 VLESS/Trojan/XHTTP 双向流、真实出站代理握手、长连接取消、慢客户端、高并发 CPU/内存与错误率、各客户端配置解析及 Analytics 账户权限/字段兼容。生产发布后的基础 HTTP 检查已经通过；这些真实代理链路和容量场景仍未由本次验收覆盖。
 
 发布前应确认新订阅可以导入、错 UUID/密码无法转发、管理接口未登录返回拒绝、KV 故障不会开放权限，以及 Metrics 中没有持续 1101 / 1102 / 子请求超限。Git 保留修复前基线和修复提交；Cloudflare 保留上一版本部署用于发布后回滚。
+
+## 2.0.1 生产发布记录
+
+- 发布时间：2026-09-26 11:27（Asia/Shanghai）。
+- 平台及项目：Cloudflare Pages / `cfnext`，生产分支 `main`，Direct Upload。
+- 线上地址：[登录页](https://cfnext-5p4.pages.dev/login)、[版本接口](https://cfnext-5p4.pages.dev/version)。
+- 生产部署：`293029a6-c191-4b16-b93f-752e0776b7b8`，控制台状态 `success`。
+- 发布源码：Git 提交 `42d0d2b` 中的 `workers.js`，打包时命名为 `_worker.js`。
+- 脚本 SHA-256：`7ba1e2cdc0bc6a67a9b0b4dde684712908cb5d32a95e6b1b4c87117762a2f4ec`。
+- 沿用生产环境的 `U`、`ADMIN` Secrets、KV `K` 绑定及兼容日期 `2026-09-25`；没有写入或重置生产 KV 配置。
+- 回滚版本：`0488c9d4-4aa4-4283-9964-13fed71c1a51`，可在 Pages 部署列表中回滚。
+
+线上基础检查：`GET /version` 返回 200 与 `2.0.1`；`GET /login` 返回 200；未登录 `GET /` 返回 404；无效订阅令牌和错误登录密码均返回 403。检查使用普通浏览器 User-Agent，未获取生产密码或 UUID，未验证登录后的真实代理流量。
