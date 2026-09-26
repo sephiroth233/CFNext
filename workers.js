@@ -20,11 +20,11 @@
 //    CF_ACCOUNT_ID CF 账户监控：账户 ID（可选，与 CF_API_TOKEN 同时设置后可在面板查看当日用量）
 //    CF_API_TOKEN  CF 账户监控：API 令牌（可选，需 Workers 用量分析读取权限，如 Account Analytics 读权限）
 //    K            已绑定 KV 命名空间时读取图形化配置
-//    RELAY_EXIT_PROBE  设为 0/false 关闭节点名里的地点后缀（可选；后缀为逐节点按优选源机房码生成）
+//    RELAY_EXIT_PROBE  设为 0/false 关闭节点名里的地点后缀（可选；后缀按优选源国家码/机房码生成）
 // ============================================================================
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '2.0.2';
+const VERSION = '2.0.4';
 
 const DEPLOY_EDITION = '明文版';
 function deployKind() { return 'plain'; }
@@ -473,11 +473,11 @@ const DEFAULT_REGION_POOLS = [
   'https://bestcf.pages.dev/random-region/US/100.txt',
   'https://bestcf.pages.dev/random-region/KR/100.txt'
 ].join('\n');
-// 识别 bestcf 地区优选池 URL：这类来源的 IP 为社区中转节点（非 CF 段），
+// 识别 bestcf 地区池及天诚源 URL：允许这类来源包含非 CF 段中转节点，
 // 允许绕过「仅 CF 段」过滤直接下发；其余来源仍保持 CF 段硬性要求
 const TRUSTED_REGION_POOL_RE = /random-region\/[A-Z]{2,}\/\d+\.txt/i;
 function isTrustedRegionPool(url) {
-  try { const u = new URL(url); return u.protocol === 'https:' && u.hostname === 'bestcf.pages.dev' && TRUSTED_REGION_POOL_RE.test(u.pathname); } catch { return false; }
+  try { const u = new URL(url); return u.protocol === 'https:' && u.hostname === 'bestcf.pages.dev' && (TRUSTED_REGION_POOL_RE.test(u.pathname) || u.pathname === '/tiancheng/all.txt'); } catch { return false; }
 }
 
 const DEFAULT_CONFIG = {
@@ -876,7 +876,7 @@ function parseIPList(text) {
       s = a; name = n;
     }
     const { host, port } = parseHostPort(s, 443);
-    if (host && isValidIp(host) && !seen.has(host)) { seen.add(host); items.push({ ip: host, port, name }); }
+    if (host && isValidIp(host) && !seen.has(host)) { seen.add(host); items.push({ ip: host, port, name, ...parseRegionMetadata(name) }); }
   });
   return items;
 }
@@ -1348,12 +1348,19 @@ async function connectDirect(target, timeoutMs) {
   return connectWithTimeout(target.hostname, target.port, timeoutMs || 6000);
 }
 
+async function connectProxyTransport(proxy, timeoutMs, secure = false) {
+  try { return await connectWithTimeout(proxy.host, proxy.port, timeoutMs, secure); }
+  catch (error) { error.proxyUnavailable = true; throw error; }
+}
+
 // 通过 SOCKS5 代理建立到目标的连接
-async function connectViaSocks5(proxy, target) {
-  // 修复：代理连接同样走 6s 超时快速失败（原先无超时，代理不可达时永久挂起 → 出站代理填写后全部超时）
-  const socket = await connectWithTimeout(proxy.host, proxy.port, 6000);
+async function connectViaSocks5(proxy, target, timeoutMs = 6000) {
+  // TCP 与代理握手共享期限，失效 IP 不能分别耗尽两轮超时。
+  const deadline = Date.now() + timeoutMs;
+  const socket = await connectProxyTransport(proxy, timeoutMs);
   const writer = socket.writable.getWriter();
   const reader = socket.readable.getReader();
+  let targetRequested = false;
   const handshake = async () => {
   // 带缓存的读取器：多余字节保留，避免丢失后续 VLESS 数据流
   let pending = new Uint8Array(0);
@@ -1386,6 +1393,7 @@ async function connectViaSocks5(proxy, target) {
   }
   // CONNECT 请求
   const connReq = new Uint8Array([5,1,0,...encodeSocksAddress(target)]);
+  targetRequested = true;
   await writer.write(connReq);
   const rep = await readN(4);
   if (rep[0] !== 5 || rep[2] !== 0 || ![1,3,4].includes(rep[3]) || rep[1] !== 0) throw new Error('SOCKS5 连接失败 码' + rep[1]);
@@ -1398,15 +1406,15 @@ async function connectViaSocks5(proxy, target) {
   if (pending.byteLength > 0) socket._preamble = pending;
   return socket;
   };
-  try { return await withTimeout(handshake(),6000,'代理握手超时'); }
-  catch(e) { closeSocket(socket); throw e; }
+  try { return await withTimeout(handshake(),Math.max(1,deadline-Date.now()),'代理握手超时'); }
+  catch(e) { if(!targetRequested)e.proxyUnavailable=true; closeSocket(socket); throw e; }
   finally { try { writer.releaseLock(); } catch {} try { reader.releaseLock(); } catch {} }
 }
 
 // 通过 HTTP/HTTPS CONNECT 代理建立连接
-async function connectViaHttpProxy(proxy, target) {
-  // 修复：代理连接同样走 6s 超时快速失败（原先无超时，代理不可达时永久挂起 → 出站代理填写后全部超时）
-  const socket = await connectWithTimeout(proxy.host, proxy.port, 6000, proxy.type === 'https');
+async function connectViaHttpProxy(proxy, target, timeoutMs = 6000) {
+  const deadline = Date.now() + timeoutMs;
+  const socket = await connectProxyTransport(proxy, timeoutMs, proxy.type === 'https');
   const writer = socket.writable.getWriter();
   const reader = socket.readable.getReader();
   const handshake = async () => {
@@ -1422,7 +1430,7 @@ async function connectViaHttpProxy(proxy, target) {
   if (leftover && leftover.byteLength > 0) socket._preamble = leftover;
   return socket;
   };
-  try { return await withTimeout(handshake(),6000,'代理握手超时'); }
+  try { return await withTimeout(handshake(),Math.max(1,deadline-Date.now()),'代理握手超时'); }
   catch(e) { closeSocket(socket); throw e; }
   finally { try { writer.releaseLock(); } catch {} try { reader.releaseLock(); } catch {} }
 }
@@ -1639,10 +1647,11 @@ function encodeSocksAddress(target) {
   else { const host=TE.encode(target.hostname); if(!host.length || host.length>255) throw new AppError(400,'目标域名过长'); addr=new Uint8Array([3,host.length,...host]); }
   return new Uint8Array([...addr,(target.port>>8)&255,target.port&255]);
 }
-async function connectViaShadowsocks(proxy, target) {
+async function connectViaShadowsocks(proxy, target, timeoutMs = 6000) {
   const algo=ssCipherAlgo(proxy.method);
   if(!algo || !proxy.password) throw new AppError(400,'SS 配置不完整或算法不支持');
-  const raw=await connectWithTimeout(proxy.host,proxy.port,6000);
+  const deadline=Date.now()+timeoutMs;
+  const raw=await connectProxyTransport(proxy,timeoutMs);
   const rw=raw.writable.getWriter(), rr=raw.readable.getReader();
   const master=ssMasterKey(proxy.password,algo.keyLen);
   let pending=new Uint8Array(0), ended=false, serverAead;
@@ -1663,7 +1672,7 @@ async function connectViaShadowsocks(proxy, target) {
     await withTimeout((async()=>{
       await rw.write(salt);
       await rw.write(await ssSealChunk(clientAead,encodeSocksAddress(target)));
-    })(),6000,'SS 握手写入超时');
+    })(),Math.max(1,deadline-Date.now()),'SS 握手写入超时');
     const readable=new ReadableStream({
       async pull(controller) {
         try {
@@ -2173,27 +2182,9 @@ const COLO_GEO = (() => {
   return m;
 })();
 // ─────────────────────────────────────────────────────────────────────────────
-// 节点名后缀：**逐节点**写「该节点流量进入 CF 的机房」= 目标网站看到的地点（2026-09-25 第 2 版）
-// 真值来源：优选源每行自带的「国家码 + 机房码」。bestcf 地区池的格式：
-//   123.51.23.113:443#地区随机 | 澳大利亚 AU | SYD | 123.51.23.113:443
-//                            ↑ 国家码        ↑ 机房码(IATA)
-// 实测核对（本机在悉尼，逐池抽样、对真实 TLS 连接读 cf-ray 尾码）：
-//   AU 池 → SYD/MEL(loc=AU)   US 池 → IAD/EWR/LAX   HK 池 → HKG   JP 池 → NRT
-//   TW 池 → TPE               SG 池 → SIN           KR 池 → ICN
-// → 源里标注的机房码 = 这个 IP 实际把你送进哪个机房，逐条吻合，可直接当真值。
-//
-// 为什么它就是「网站看到的地点」：Worker 在「请求进入 CF 的那个机房」上运行（任播就近），
-//   所以直连出站就是该机房的出口（同国家/城市）；CF 托管站点直连被回环保护拦截、跌到反代兜底时，
-//   反代也按同一机房选地区（selectRelayRegion），国家一致。
-//
-// ⚠ 为什么不再用上一版「实测反代出口」写名字（那是错的，已删）：
-//   ① 出口只由请求落点决定 → 同一次订阅里所有节点写出来**完全相同**（实测 70 条全写「美国 US」）；
-//   ② 反代池本身混着别国机器：实测 proxyip.us.* 池里就有出口在 HK 的机器；
-//      proxyip.nl.* 有 13 个 IP 在黑山(ME)、proxyip.se.* 混有荷兰/俄罗斯 —— 按池抽样得出的国家不可信。
-// 无机房码的节点（内置保底 / 随机 CIDR / 自定义命名）不加后缀：没有真值就不编。
-// 格式（用户指定）：后缀 + 前后带空格的竖线；「国家 国家码 城市 机房码」。
-//   例：澳大利亚-03 | 澳大利亚 AU 悉尼 SYD
-//   例：香港-06     | 中国香港 HK 香港 HKG
+// 节点地点后缀来自订阅源的备注，不代表探测到的真实出站地址。
+// 已知机房码可查静态城市表；仅有国家/地区码时只显示地区，不猜城市。
+// 这些标签用于命名和筛选，不控制连接的实际出口。
 const RELAY_GEO_ZH = {
   US: '美国', HK: '中国香港', TW: '中国台湾', MO: '中国澳门', SG: '新加坡', JP: '日本',
   KR: '韩国', DE: '德国', SE: '瑞典', NL: '荷兰', FI: '芬兰', GB: '英国', AU: '澳大利亚',
@@ -2201,19 +2192,63 @@ const RELAY_GEO_ZH = {
 };
 // 港澳台在 CF 官方 PoP 表里国家字段是 CN，这里按规范写法强制归到对应地区码
 const EXIT_FORCE_CC = { HKG: 'HK', TPE: 'TW', MFM: 'MO' };
-// colo（机房码）+ cc（源里标注的国家码）→ 后缀；机房码不在表内则返回空串（不编地点）
+const REGION_NAMES = (() => {
+  const names = Object.create(null);
+  for (const geo of Object.values(COLO_GEO)) {
+    const match = geo.country.match(/^(.*)\s+([A-Z]{2})$/);
+    if (match) names[match[2]] = match[1];
+  }
+  return Object.assign(names, REGION_CN, RELAY_GEO_ZH);
+})();
+const REGION_NAME_MATCHERS = Object.entries({
+  ...Object.fromEntries(Object.entries(REGION_NAMES).map(([cc, name]) => [name, cc])),
+  ...Object.fromEntries(Object.entries(REGION_CN).map(([cc, name]) => [name, cc])),
+  'United States': 'US', 'United Kingdom': 'GB', 'Hong Kong': 'HK',
+  Taiwan: 'TW', Singapore: 'SG', Japan: 'JP', 'South Korea': 'KR', Germany: 'DE',
+  Australia: 'AU', Canada: 'CA', France: 'FR', Netherlands: 'NL',
+  '台灣': 'TW', '美國': 'US', '韓國': 'KR'
+}).sort((a,b) => b[0].length-a[0].length).map(([name,cc]) => ({
+  cc, pattern: new RegExp(/[A-Za-z]/.test(name) ? '\\b'+name+'\\b' : name, 'i')
+}));
+function countryCodeForColo(colo) {
+  return EXIT_FORCE_CC[colo] || ((COLO_GEO[colo]?.country || '').match(/([A-Z]{2})$/) || [])[1] || '';
+}
+// 只解析来源备注，不做 IP 定位：独立国家码 > 旗帜 > 机房码 > 标准地区名。
+// 国家码按完整词元匹配，避免把 CUSTOM / RUSSIA / CF-B-163 中的片段当地区。
+function parseRegionMetadata(rawName) {
+  const name = String(rawName || '').normalize('NFKC');
+  if (!name) return {};
+  const tokens = name.split(/[^A-Za-z0-9]+/).filter(Boolean);
+  const fields = name.split('|').map(s => s.trim().toUpperCase());
+  let cc = fields.find(s => s.length===2 && REGION_NAMES[s])
+    || tokens.find(s => /^[A-Z]{2}$/.test(s) && REGION_NAMES[s]) || '';
+  let colo = tokens.find(s => /^[A-Z]{3}$/.test(s) && COLO_GEO[s]) || '';
+  if (!cc) {
+    const flag = name.match(/[\u{1F1E6}-\u{1F1FF}]{2}/u);
+    if (flag) {
+      const code = [...flag[0]].map(c => String.fromCharCode(c.codePointAt(0)-0x1F1E6+65)).join('');
+      if (REGION_NAMES[code]) cc=code;
+    }
+  }
+  if (!cc && colo) cc=countryCodeForColo(colo);
+  if (!cc) cc=REGION_NAME_MATCHERS.find(({pattern}) => pattern.test(name))?.cc || '';
+  if (cc==='CN' && EXIT_FORCE_CC[colo]) cc=EXIT_FORCE_CC[colo];
+  // 来源国家码与机房冲突时只保留国家，避免生成“美国 东京”这种组合。
+  if (colo && cc!==countryCodeForColo(colo)) colo='';
+  return cc ? {cc, ...(colo ? {colo} : {})} : {};
+}
+// 有机房码才显示城市；只有国家/地区码时只显示地区后缀。
 function geoNameSuffix(colo, cc) {
   const c = String(colo || '').toUpperCase();
-  // 出口被归并的机房（EXIT_VIA_REGION 有收录时）：名字写实际出口地区，
-  // 与 selectRelayRegion 同源 —— 名字与「网站看到的地点」保持一致。当前表为空，不走此分支。
+  // 若配置了地区归并则显示配置标签；这不是出口实测结果。当前归并表为空。
   const via = EXIT_VIA_REGION[c];
   if (via) {
     const r = REGION_EXIT_GEO[via];
     return r ? ' | ' + [r.zh, r.cc, r.city, r.code].join(' ') : '';
   }
   const g = c ? COLO_GEO[c] : null;
-  if (!g) return '';
-  const code = EXIT_FORCE_CC[c] || String(cc || '').toUpperCase() || ((g.country || '').match(/([A-Z]{2})\s*$/) || [])[1] || '';
+  const code = EXIT_FORCE_CC[c] || String(cc || '').toUpperCase() || ((g?.country || '').match(/([A-Z]{2})\s*$/) || [])[1] || '';
+  if (!g || code!==countryCodeForColo(c)) return REGION_NAMES[code] ? ' | '+REGION_NAMES[code]+' '+code : '';
   const zh = (RELAY_GEO_ZH[code] || REGION_CN[code] || g.country || '').replace(/\s+[A-Z]{2}$/, '');
   const parts = zh ? [zh] : [];
   if (code) parts.push(code);
@@ -2288,59 +2323,81 @@ async function resolveProxyIPs(host, port, io) {
   return result;
 }
 
-// 打开到目标的出站连接（含内置地区反代 / 自定义反代透明代理 / 出站代理 / 直连）
-// 所有模式均为透明代理：发送去掉 VLESS 头部的原始 TLS 数据，对端按 SNI 路由到目标
+// 仅缓存代理端点自身的失败；目标网站拒绝 CONNECT 不应影响其他目标。
+// isolate 内短暂避开已知失效的地址，修改代理配置后立即重新尝试。
+const OUTBOUND_PROXY_FAILURES = new Map();
+const OUTBOUND_PROXY_FALLBACK_MS = 2000;
+const OUTBOUND_PROXY_COOLDOWN_MS = 30000;
+
+// 出站代理连接真实目标；失败后复用未配置代理时的完整出站路径。
 async function openOutbound(parsed, cfg, colo, isVless) {
   const proxy = parseProxyAddress(cfg.outboundProxy);
   const mode = cfg.outboundMode || '';
-
-  const viaProxy = proxy ? (proxy.type === 'http' || proxy.type === 'https'
-    ? (t) => connectViaHttpProxy(proxy, t)
-    : proxy.type === 'ss'
-      ? (t) => connectViaShadowsocks(proxy, t)
-      : (t) => connectViaSocks5(proxy, t)) : null;
-
+  if (!proxy) {
+    if (mode === 'only') throw new AppError(503,'仅代理模式缺少出站代理');
+    return openDirectOutbound(parsed,cfg,colo);
+  }
   const destination = {hostname:parsed.addr,port:parsed.port};
-  if(mode==='only'){if(!viaProxy)throw new AppError(503,'仅代理模式缺少出站代理');return viaProxy(destination);}
+  const proxyKey = md5hex(cfg.outboundProxy);
+  const viaProxy = async () => {
+    if (mode !== 'only' && (OUTBOUND_PROXY_FAILURES.get(proxyKey) || 0) > Date.now()) {
+      throw new AppError(503,'代理端点暂不可用，使用兜底路径');
+    }
+    const timeoutMs = mode === 'only' ? 6000 : OUTBOUND_PROXY_FALLBACK_MS;
+    try {
+      const socket = await (proxy.type === 'http' || proxy.type === 'https'
+        ? connectViaHttpProxy(proxy,destination,timeoutMs)
+        : proxy.type === 'ss'
+          ? connectViaShadowsocks(proxy,destination,timeoutMs)
+          : connectViaSocks5(proxy,destination,timeoutMs));
+      OUTBOUND_PROXY_FAILURES.delete(proxyKey);
+      return socket;
+    } catch (error) {
+      if (error.proxyUnavailable) boundedSet(OUTBOUND_PROXY_FAILURES,proxyKey,Date.now()+OUTBOUND_PROXY_COOLDOWN_MS);
+      throw error;
+    }
+  };
+  if (mode === 'only') return viaProxy();
+  // 直连优先仍先连接真实目标，失败后再使用代理和中继。
+  if (mode === 'no') {
+    try { return await connectDirect(destination,6000); } catch {}
+  }
+  try { return await viaProxy(); } catch {}
+  // 代理等待不占用兜底的 15 秒/4 次连接预算。
+  return openDirectOutbound(parsed,cfg,colo,mode==='no');
+}
+
+// 自定义透明反代 → 直连真实目标 → 内置地区反代。
+// 与清空出站代理后的路径一致；透明反代直接连接，不再经过失效代理。
+async function openDirectOutbound(parsed, cfg, colo, skipDirect = false) {
   let lastErr, attemptsMade=0;
   const deadline=Date.now()+15000;
-  const tryConnect = async (attempts) => {
-    for (const fn of attempts) {
-      if(attemptsMade++>=4 || Date.now()>=deadline)throw new AppError(504,'出站重试预算耗尽');
-      let expired=false;
-      const job=fn().then(socket=>{if(expired){closeSocket(socket);throw new Error('出站连接过期');}return socket;});
-      try { return await withTimeout(job,Math.max(1,deadline-Date.now()),'出站连接超时'); }
-      catch(e){expired=true;lastErr=e;}
-    }
-    return null;
+  const tryConnect = async (target,timeoutMs) => {
+    if(attemptsMade++>=4 || Date.now()>=deadline)throw new AppError(504,'出站重试预算耗尽');
+    try { return await connectDirect(target,Math.max(1,Math.min(timeoutMs,deadline-Date.now()))); }
+    catch(e){lastErr=e;return null;}
+  };
+  const resolveTargets = async (host,port) => {
+    if(Date.now()>=deadline)throw new AppError(504,'出站重试预算耗尽');
+    try { return await withTimeout(resolveProxyIPs(host,port,cfg._io),Math.max(1,deadline-Date.now()),'反代解析超时'); }
+    catch(e){lastErr=e;return [];}
   };
 
-  // 出站模式只决定真实目标的代理/直连顺序；透明反代必须直接连接，
-  // 否则代理会连到反代地址，代理成功也无法保证由代理本身出站。
-  if (viaProxy) {
-    const attempts = mode === 'no'
-      ? [() => connectDirect(destination,6000), () => viaProxy(destination)]
-      : [() => viaProxy(destination), () => connectDirect(destination,6000)];
-    const connected = await tryConnect(attempts);
-    if (connected) return connected;
-  }
-
-  // 1) 用户自定义 proxyIP 透明代理：无出站代理时优先尝试；
-  //    有出站代理时，在代理和目标直连均失败后尝试。
+  // 1) 用户自定义 proxyIP 透明代理。
   const relay = cfg.proxyIP ? parseHostPort(cfg.proxyIP, 443) : null;
   if (relay && relay.host) {
-    let customTargets = await resolveProxyIPs(relay.host, relay.port, cfg._io);
+    let customTargets = await resolveTargets(relay.host, relay.port);
     if (!customTargets.length) customTargets = [{ hostname: relay.host, port: relay.port }];
     for (const target of customTargets) {
-      const r = await tryConnect([() => connectDirect(target,6000)]);
+      const r = await tryConnect(target,6000);
       if (r) return r;
     }
   }
 
-  // 2) 未配置出站代理时直连目标（已配置时在上方按模式尝试过）
+  // 2) 直连目标；直连优先模式已在上方尝试，避免重复等待。
   //    6s 连接超时：目标 SYN 被丢弃 / 直连被回环保护拦截时不再无限挂起，及时进入反代兜底
-  if (!viaProxy) {
-    const directResult = await tryConnect([() => connectDirect(destination,6000)]);
+  if (!skipDirect) {
+    const directResult = await tryConnect({hostname:parsed.addr,port:parsed.port},6000);
     if (directResult) return directResult;
   }
 
@@ -2354,11 +2411,10 @@ async function openOutbound(parsed, cfg, colo, isVless) {
     for (const region of regions) {
       const relayDomain = RELAY_DOMAINS[region];
       if (!relayDomain) continue;
-      let relayTargets = [];
-      try { relayTargets = await resolveProxyIPs(relayDomain, 443, cfg._io); } catch (e) { /* 忽略 */ }
+      const relayTargets = await resolveTargets(relayDomain, 443);
       if (!relayTargets.length) continue;
       for (const target of relayTargets) {
-        const r = await tryConnect([() => connectDirect(target,5000)]);
+        const r = await tryConnect(target,5000);
         if (r) return r;
       }
     }
@@ -2418,6 +2474,8 @@ async function handleWebSocketProxy(request, cfg) {
         parsed=protocol==='trojan'?parseTrojanHeader(pending):parseVlessHeader(pending);
       }catch(e){if(e.message==='头部过短' && pending.length<=1024)return;throw e;}
       authenticateProxy(parsed,cfg,protocol);
+      // 10 秒只约束客户端提交协议头；出站连接和兜底有各自的超时预算。
+      clearTimeout(handshakeTimer);
       socket=await openOutbound(parsed,cfg,request.cf?.colo,protocol==='vless');
       if(closed){closeSocket(socket);return;}
       writer=socket.writable.getWriter();reader=socket.readable.getReader();
@@ -2780,7 +2838,7 @@ async function fetchTimeout(url,opts={},ms=6000,io=createIO()){
 
 // 解析优选域名/优选API为 IP：URL 数据源与域名并发拉取（避免串行拖垮订阅墙钟）；按输入顺序均衡截断 maxTotal，保证各地区节点都有
 // allowRegionFallback：仅「自定义订阅 + 追加内置及默认节点」开启时允许地区回退生成——
-// 数据源能确定地区（路径含地区码）但无可解析 IP 时，用 CF 段随机生成该地区节点；
+// 地区只从节点备注解析，不由来源 URL 或随机 IP 推定；
 // filterCF：仅自定义模式（关闭追加）传 false，输入框内容原样下发（用户自担可用性）；追加/默认模式保持 CF 段过滤保证可达
 // v6：默认 IPv4 模式跳过 AAAA 查询（省一半 DNS 子请求）；仅筛选含 IPv6 时传 true
 async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTotal = 300, allowRegionFallback = false, filterCF = true, v6 = false, io = createIO()) {
@@ -2829,7 +2887,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
         const seen = new Set();
         const counters = {};
         const rec = [];
-        // bestcf 地区优选池：社区维护的可达中转 IP（非 CF 段），标记后允许绕过 CF 段过滤直接下发（v1.0.5 修复）
+        // 已知 bestcf 地区池/天诚源允许非 CF 段中转 IP；识别来源不等于验证节点可达性。
         const relay = isTrustedRegionPool(d);
         // 追加/默认模式强制 CF 段；bestcf 地区优选池（社区中转）放行；仅自定义模式（filterCF=false）原样下发
         const pass = (ip) => !filterCF || isCloudflareIP(ip) || relay;
@@ -2863,7 +2921,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
               seen.add(key);
               let nm = remarkIdx !== -1 && cols[remarkIdx] ? cols[remarkIdx] : '';
               if (!nm && delayIdx !== -1 && speedIdx !== -1) nm = 'CF优选 ' + (cols[delayIdx] || '') + 'ms ' + (cols[speedIdx] || '') + 'MB/s';
-              if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...(relay ? { relay: true } : {}) }); }
+              if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...parseRegionMetadata(nm), ...(relay ? { relay: true } : {}) }); }
               else rec.push({ ip, port, name: '', ...(relay ? { relay: true } : {}) });
             }
             boundedSet(DNH_CACHE,ck,{t:now,ips:rec});
@@ -2889,7 +2947,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
             seen.add(key);
             // 名称保留线路名称/数据中心（含「移动/联通/电信」时面板 isp 筛选生效）
             const nm = (cells['线路名称'] || cells['数据中心'] || '线路').trim();
-            if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...(relay ? { relay: true } : {}) }); }
+            if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...parseRegionMetadata(nm), ...(relay ? { relay: true } : {}) }); }
             else rec.push({ ip, port, name: '', ...(relay ? { relay: true } : {}) });
           }
           boundedSet(DNH_CACHE,ck,{t:now,ips:rec});
@@ -2909,7 +2967,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
           let nm = '';
           const hashIdx = line.indexOf('#');
           if (hashIdx >= 0) { try { nm = decodeURIComponent(line.slice(hashIdx + 1).trim()); } catch (e) { nm = line.slice(hashIdx + 1).trim(); } }
-          if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip: host, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...(relay ? { relay: true } : {}) }); }
+          if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip: host, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...parseRegionMetadata(nm), ...(relay ? { relay: true } : {}) }); }
           else rec.push({ ip: host, port, name: '', ...(relay ? { relay: true } : {}) });
         }
         // 纯文本行：IP / IP:端口 / IP:端口#名称（如 bestcf 的 "IP:端口#地区随机 | 香港 HK | HKG | ..."）
@@ -2923,19 +2981,17 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
           if (seen.has(key)) continue;   // 源内去重（同 IP 同端口只留一条）
           if (!pass(ip)) continue;
           seen.add(key);
-          // 名称：优先匹配 "中文 地区码"（bestcf 格式 "地区随机 | 香港 HK"），再取纯中文段，再取地区码映射，否则留空走“优选IP-XX”兜底
+          // 结构化备注优先取地区元数据命名；无地区信息时保留原有名称提取规则。
           // 【新增】用户自定义名称（不含中文、不含 |）直接保留原样，例如 JP-A-147 / CF-B-163
           const rawName = (m[3] || '').trim();
-          // 地区真值：源行自带的「国家码 + 机房码」，供节点名后缀逐节点使用（取不到就不加后缀）
-          const segsGeo = (m[3] || '').split('|').map(s => s.trim());
-          const coloTag = segsGeo.find(s => /^[A-Z]{3}$/.test(s) && COLO_GEO[s]) || '';
-          const ccTag = ((m[3] || '').match(/\b([A-Z]{2})\b/) || [])[1] || '';
+          const region = parseRegionMetadata(rawName);
           if (rawName && !/[\u4e00-\u9fa5]/.test(rawName) && !rawName.includes('|')) {
-            rec.push({ ip, port, name: rawName, ...(relay ? { relay: true } : {}) });
+            rec.push({ ip, port, name: rawName, ...region, ...(relay ? { relay: true } : {}) });
             continue;
           }
-          let nm = '';
-          if (m[3]) {
+          // 结构化备注优先使用明确国家码，避免昵称盖过 HK / SG 等字段。
+          let nm = rawName.includes('|') && region.cc ? (REGION_CN[region.cc] || REGION_NAMES[region.cc]) : '';
+          if (!nm && m[3]) {
             // 优先匹配「中文地区名 + 空格 + 地区码」（如 "澳大利亚 AU"），锚定开头避免 4 字以上地区名被截断（如"澳大利亚"误取"大利亚"）
             const zhCode = m[3].match(/^\s*[\u4e00-\u9fa5]{2,5}\s+[A-Z]{2}/);
             if (zhCode) { const cn = zhCode[0].match(/[\u4e00-\u9fa5]{2,5}/); if (cn) nm = cn[0]; }
@@ -2952,8 +3008,8 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
               }
             }
           }
-          if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...(relay ? { relay: true } : {}), colo: coloTag, cc: ccTag }); }
-          else rec.push({ ip, port, name: '', ...(relay ? { relay: true } : {}), colo: coloTag, cc: ccTag });
+          if (nm) { counters[nm] = (counters[nm] || 0) + 1; rec.push({ ip, port, name: nm + '-' + String(counters[nm]).padStart(2, '0'), ...region, ...(relay ? { relay: true } : {}) }); }
+          else rec.push({ ip, port, name: '', ...region, ...(relay ? { relay: true } : {}) });
         }
         boundedSet(DNH_CACHE,ck,{t:now,ips:rec});
         return rec.slice();   // 返回副本：均衡截断的 shift() 会原地修改数组，直接返回引用会污染缓存
@@ -2975,7 +3031,7 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
       const isIp = isValidIp(host);
       if (!isIp && !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(host)) return [];
       if (filterCF && isIp && !isCloudflareIP(host)) return [];
-      if (rawName) return [{ ip: host, port, name: rawName }];   // 带名称原样下发（域名保留让客户端动态解析，名称不被重写）
+      if (rawName) return [{ ip: host, port, name: rawName, ...parseRegionMetadata(rawName) }];   // 域名保留让客户端动态解析，自定义名称保留
       if (isIp) return [{ ip: host, port, name: '' }];
       // 无名称的域名：落入下方 DoH 解析分支（与原先一致）
     }
@@ -3020,8 +3076,8 @@ function rotateItems(items,seed){
 
 async function buildNodes(cfg, cap = 800, skipSet = null) {
   const nodes = [];
-  // 本次生成：节点入口 IP → 源里标注的 { colo, cc }，供逐节点写地点后缀（_ 前缀字段不落 KV）
-  cfg._coloByIP = new Map();
+  // 按地址和端口保留来源地区；国家码不再依赖机房码，同 IP 不同端口互不覆盖。
+  cfg._regionByEndpoint = new Map();
   const used = new Set();
   // 订阅模式：random 随机优选（CF CIDR 随机生成指定数量，不经域名解析）
   const mode = (cfg.optimizer && cfg.optimizer.subMode) || '';
@@ -3044,7 +3100,8 @@ async function buildNodes(cfg, cap = 800, skipSet = null) {
     const key = server + ':' + port;   // 按 服务器:端口 去重（单端口机制：同 IP 同端口仅下发一次）
     if (used.has(key)) return;
     used.add(key);
-    if (colo && isValidIp(server)) cfg._coloByIP.set(server, { colo, cc: cc || '' });
+    const region = colo || cc ? {colo,cc} : parseRegionMetadata(name);
+    if (region.cc || region.colo) cfg._regionByEndpoint.set(key,region);
     const isTls = !HTTP_PORTS.has(Number(port));
     if (cfg.tlsOnly && !isTls) return;   // TLS 控制：仅下发 TLS 端口节点，明文端口跳过
     // 节点端口统一按 1.0.6 机制（方案 B）：端口原样下发（默认/自定义/随机优选均固定源端口，通常是 443），
@@ -3218,42 +3275,42 @@ function parseShareNode(n, i) {
   return { srv, prt, name, user, isTrojan, tls };
 }
 
-// 地区 / 运营商标签表：按节点名称中的关键字匹配
-const REGION_TAGS = { HK: ['HK', '香港'], TW: ['TW', '台湾'], US: ['US', '美国'], SG: ['SG', '新加坡'], JP: ['JP', '日本'], KR: ['KR', '韩国'], DE: ['DE', '德国'] };
+// 运营商标签仍按名称匹配；地区使用解析后的国家/地区码。
 const ISP_TAGS = { 移动: ['移动', 'CM', 'CHINAMOBILE'], 联通: ['联通', 'CU', 'UNICOM'], 电信: ['电信', 'CT', 'CHINATELECOM'] };
 const FILTER_ISPS = ['移动', '联通', '电信'];
 const FILTER_IPTYPES = ['IPv4', 'IPv6'];
 
-// 按面板筛选配置过滤节点（region 按名称地区标记、ipType 按地址类型、isp 按名称运营商标记）
+// 按面板筛选配置过滤节点（region 优先用来源元数据，ipType 按地址类型，isp 按名称标记）
 // 任何维度筛选后为空时逐级放宽（isp → ipType → region），保证订阅永不为空（避免客户端「无效订阅」）
-function filterNodes(nodes, filter) {
+function filterNodes(nodes, filter, regionByEndpoint) {
   if (!filter || !filter.region && !filter.ipType && !filter.isp) return nodes;
   const region = filter.region || 'all';
   const ipType = filter.ipType || FILTER_IPTYPES;
   const isp = filter.isp || FILTER_ISPS;
   // 预解析节点（名称解析一次，供各轮过滤与池标记检查复用）
   const meta = nodes.map(n => {
-    const { host } = parseNodeServer(n);
+    const { host, port } = parseNodeServer(n);
     let name = '';
     try {
       const h = n.indexOf('#');
       if (h >= 0) name = decodeURIComponent(n.slice(h + 1) || '');
     } catch (e) { name = ''; }
-    return { host, name, up: name.toUpperCase() };
+    const sourceRegion = regionByEndpoint?.get(host+':'+port) || parseRegionMetadata(name);
+    return { host, name, up: name.toUpperCase(), cc: sourceRegion.cc || countryCodeForColo(sourceRegion.colo) };
   });
   // 池内无任何运营商标记时 ISP 筛选不生效（默认数据源节点名仅含地区，按运营商过滤会清空节点池）
   const poolHasIsp = meta.some(m => m.up && Object.keys(ISP_TAGS).some(k => (ISP_TAGS[k] || [k]).some(t => m.up.includes(t.toUpperCase()))));
   const apply = (rg, t, s) => {
     // rg 兼容字符串（旧配置 'all'/'HK'）与数组（面板多选地区 ['HK','SG']）；数组含 'all' 或空 = 全部地区
-    const tg = Array.isArray(rg)
-      ? (rg.length === 0 || rg.includes('all') ? null : rg.flatMap(r => REGION_TAGS[r] || []))
-      : (rg !== 'all' ? (REGION_TAGS[rg] || []) : null);
+    const regions = (Array.isArray(rg) ? rg : [rg]).map(r => String(r).toUpperCase());
+    const selected = !regions.length || regions.includes('ALL') ? null : regions;
     const partial = s.length > 0 && s.length < FILTER_ISPS.length;
     return nodes.filter((n, i) => {
       const m = meta[i];
       const isV6 = m.host.indexOf(':') >= 0;
       if (!m.name) return false;  // 跳过无法解析的非法节点
-      if (tg && !tg.some(t2 => m.up.includes(t2.toUpperCase()))) {
+      if (selected && m.cc && !selected.includes(m.cc)) return false;
+      if (selected && !m.cc) {
         // 无地区标记的通用节点（优选IP-XX / 优选IP-SXX / 优选域名-XX / 域名-XX / 随机补足-XXX / 随机优选-XX /
         // 原生地址 / 内置·保底-XX）是 CF 通用入口，任意地区可用，不参与地区过滤；地区过滤仅剔除明确标记为
         // 其它地区的节点，避免指定地区后节点数量骤减
@@ -3931,7 +3988,7 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo, env) {
   // 默认模式剔除数量由 fillCount 自动补足（补足路径同样已测活），下发总量保持不变
   // 二次测活移除（对齐 1.0.6）：默认模式不再对优选 IP 池做 TCP 测活剔除——Worker 边缘连通性 ≠ 客户端连通性，
   // 测活误杀导致可用节点少、订阅生成慢；全量下发由客户端自行择优（fillCount 补足块内的小范围测活仍保留）
-  let nodes = filterNodes(await buildNodes(rc, cap, skipSet), fl);
+  let nodes = filterNodes(await buildNodes(rc, cap, skipSet), fl, rc._regionByEndpoint);
   // 兜底入口节点：自定义订阅严格模式（仅下发框内节点）不追加，其余模式追加原生地址与地区反代入口；
   // 仅勾选 IPv6 时跳过（原生地址/反代均为 IPv4 域名，混入会破坏「只下发 IPv6」语义）
   const strictCustom = (mode === 'custom' && !(cfg.optimizer && cfg.optimizer.subIncludeDefault));
@@ -3984,17 +4041,17 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo, env) {
   }
   // 严格封顶：多协议膨胀可能越过 cap 一个 IP（3 条），统一截断到上限；节点数量控制开启时同样按设定值精确截断
   if (nodes.length > cap) nodes.length = cap;
-  // 节点命名：逐节点在链接末尾追加「地点」后缀（按各自源里的机房码；无机房码的节点不加）。
+  // 节点命名：按来源国家码/机房码追加地点后缀；只有国家码时不显示城市。
   // 放在所有追加/截断之后，避免影响 filterNodes 的地区标记判定（它跑在改名之前）。
   // 关闭开关：环境变量 RELAY_EXIT_PROBE=0（沿用旧开关名，现在表示「不写地点后缀」）。
   if (!cfg._noExitProbe) {
-    const _coloMap = rc._coloByIP;   // rc = Object.assign({}, cfg) 浅拷贝，buildNodes 写在 rc 上
-    if (_coloMap && _coloMap.size) {
+    const _regionMap = rc._regionByEndpoint;
+    if (_regionMap && _regionMap.size) {
       for (let i = 0; i < nodes.length; i++) {
         if (nodes[i].indexOf('#') <= 0) continue;
-        let _host = '';
-        try { _host = parseNodeServer(nodes[i]).host; } catch (e) { continue; }
-        const _meta = _host ? _coloMap.get(_host) : null;
+        let _endpoint;
+        try { _endpoint = parseNodeServer(nodes[i]); } catch (e) { continue; }
+        const _meta = _regionMap.get(_endpoint.host+':'+_endpoint.port);
         if (!_meta) continue;
         const _sfx = geoNameSuffix(_meta.colo, _meta.cc);
         if (_sfx) nodes[i] += uriFragName(_sfx);
