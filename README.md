@@ -2,7 +2,7 @@
 
 Cloudflare Workers / Pages 单文件代理与订阅管理面板。仓库主脚本为 `workers.js`，保留 VLESS over WebSocket、Trojan over WebSocket、VLESS XHTTP，以及 SOCKS5、HTTP/HTTPS CONNECT、Shadowsocks AEAD 出站。当前实现仅转发 TCP；客户端应使用本地 DNS 或 DoH，不支持通用 UDP 转发。
 
-本次修复对应已有的 **Pages 项目 `cfnext`**。2.0.1 已于 2026-09-26 发布到生产环境，发布记录见文末。
+本次修复对应已有的 **Pages 项目 `cfnext`**。当前生产版本为 2.0.2，发布记录见文末。
 
 ## 2.0.2 主题行为
 
@@ -123,3 +123,11 @@ Cloudflare 禁止 TCP sockets 直连 Cloudflare IP 段。因此云端跳过这�
 - 回滚版本：`0488c9d4-4aa4-4283-9964-13fed71c1a51`，可在 Pages 部署列表中回滚。
 
 线上基础检查：`GET /version` 返回 200 与 `2.0.1`；`GET /login` 返回 200；未登录 `GET /` 返回 404；无效订阅令牌和错误登录密码均返回 403。检查使用普通浏览器 User-Agent，未获取生产密码或 UUID，未验证登录后的真实代理流量。
+
+## 2.0.2 生产发布记录
+
+- 发布日期：2026-09-26；Pages 项目 `cfnext`，生产部署 `a7fee6ba-38e9-4a24-a5ba-d0e8d25e6c46`。
+- 发布源码：Git `6a34f95`；脚本 SHA-256 `8458fb371980db3f701129daa7b3dc7109c8cd7b77b2e7b01eb550fa913f9a08`。
+- 变更：登录页与管理面板共用主题逻辑，默认跟随系统，支持手动选择及恢复自动模式。
+- 验证：本地浏览器确认默认匹配系统、日间/夜间/自动循环和手动偏好刷新后保留；线上版本接口返回 `2.0.2`，登录页在系统浅色时使用浅色主题。
+- 回滚部署：`293029a6-c191-4b16-b93f-752e0776b7b8`（2.0.1）。生产 Secrets 与 KV 配置未修改。
