@@ -10,8 +10,6 @@
 //    PROXYIP      自定义反代/落地 IP（可选，填写后作为固定出口优先使用；留空则直连失败时由内置地区反代兜底，格式 host 或 host:port）
 //    S / OUTBOUND 出站代理（可选，socks5:// / http:// / ss:// 或 host:port）
 //    ECH          设为 true/1 开启 ECH 加密（可选）
-//    TROJAN       设为 true/1 开启 Trojan 协议（可选）
-//    TROJAN_PASSWORD  Trojan 独立密码（留空时使用 UUID）
 //    ALPN         自定义 ALPN 协商（可选）
 //    YX           自定义优选 IP 列表（可选，格式 IP:port#名称，逗号分隔）
 //    YXURL        优选器自定义数据源 URL（可选）
@@ -173,8 +171,6 @@ const DEFAULT_CONFIG = {
   host: '',
   // 协议开关
   enableVless: true,
-  enableTrojan: false,
-  trojanPassword: '',
   enableXhttp: false,
   // 传输参数
   alpn: '',
@@ -639,8 +635,10 @@ class AppError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 const CONFIG_CACHE = new WeakMap();
-const PRIVATE_FIELDS = ['admin', 'trojanPassword', 'outboundProxy', 'cfApiToken'];
-const ENV_FIELDS = { U: 'uuid', D: 'path', PATH: 'path', ADMIN: 'admin', admin: 'admin', S: 'outboundProxy', OUTBOUND: 'outboundProxy', TROJAN_PASSWORD: 'trojanPassword', CF_API_TOKEN: 'cfApiToken', CF_ACCOUNT_ID: 'cfAccountId' };
+// 仅加载和保存当前配置字段，旧版本已移除的开关与凭据不再进入运行时。
+const CONFIG_FIELDS = new Set([...Object.keys(DEFAULT_CONFIG), 'subUrl', 'src', 'configVersion']);
+const PRIVATE_FIELDS = ['admin', 'outboundProxy', 'cfApiToken'];
+const ENV_FIELDS = { U: 'uuid', D: 'path', PATH: 'path', ADMIN: 'admin', admin: 'admin', S: 'outboundProxy', OUTBOUND: 'outboundProxy', CF_API_TOKEN: 'cfApiToken', CF_ACCOUNT_ID: 'cfAccountId' };
 async function kvGetConfigCached(env) {
   if (!env.K) return null;
   const hit = CONFIG_CACHE.get(env.K);
@@ -667,13 +665,13 @@ function validateConfig(cfg) {
   for (const key of ['path', 'subUrl']) {
     if (cfg[key] && (!/^[A-Za-z0-9_.~-]{1,128}$/.test(cfg[key]) || ['s','login','version','favicon.ico'].includes(cfg[key]))) throw new AppError(400, '面板路径和订阅别名必须是单个非保留路径段');
   }
-  for (const key of ['enableVless','enableTrojan','enableXhttp','polling','probeAlive','nodeLimit','quotaAuto','tlsOnly','ech']) {
+  for (const key of ['enableVless','enableXhttp','polling','probeAlive','nodeLimit','quotaAuto','tlsOnly','ech']) {
     if (typeof cfg[key] !== 'boolean') throw new AppError(400, '配置开关格式错误: ' + key);
   }
   if (!Array.isArray(cfg.preferredIPs) || cfg.preferredIPs.length > 2000) throw new AppError(400, '优选 IP 最多 2000 条');
   if (typeof cfg.preferredDomains !== 'string' || cfg.preferredDomains.length > 16384) throw new AppError(400, '优选来源过长');
   if (!cfg.optimizer || typeof cfg.optimizer !== 'object' || Array.isArray(cfg.optimizer)) throw new AppError(400, '优选配置格式错误');
-  for (const key of ['admin','host','trojanPassword','outboundProxy','outboundMode','proxyIP','cfApiToken','cfAccountId','alpn','echHost','echDns']) {
+  for (const key of ['admin','host','outboundProxy','outboundMode','proxyIP','cfApiToken','cfAccountId','alpn','echHost','echDns']) {
     if (typeof cfg[key] !== 'string' || cfg[key].length > 4096 || /[\r\n\0]/.test(cfg[key])) throw new AppError(400, '配置字段格式错误: ' + key);
   }
   if (!['','no','only'].includes(cfg.outboundMode)) throw new AppError(400, '出站模式无效');
@@ -690,14 +688,13 @@ async function loadConfig(env) {
   const cfg = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
   const stored = await kvGetConfigCached(env);
   if (stored) {
-    for (const key of Object.keys(stored)) if (!key.startsWith('_') && !['__proto__','constructor','prototype'].includes(key)) cfg[key] = stored[key];
+    for (const key of Object.keys(stored)) if (CONFIG_FIELDS.has(key)) cfg[key] = stored[key];
     cfg.optimizer = { ...DEFAULT_CONFIG.optimizer, ...stored.optimizer };
   }
   for (const [key, field] of Object.entries(ENV_FIELDS)) if (env[key] !== undefined && env[key] !== '') cfg[field] = String(env[key]);
   if (env.HOST) cfg.host = String(env.HOST).replace(/^https?:\/\//, '').split('/')[0];
   if (env.PROXYIP) cfg.proxyIP = String(env.PROXYIP);
   if (env.ECH !== undefined) cfg.ech = /^(1|true)$/.test(String(env.ECH));
-  if (env.TROJAN !== undefined) cfg.enableTrojan = /^(1|true)$/.test(String(env.TROJAN));
   if (env.ALPN) cfg.alpn = String(env.ALPN);
   if (env.YX) cfg.preferredIPs = parseIPList(env.YX);
   if (env.YXURL) cfg.optimizer.sourceURL = String(env.YXURL);
@@ -706,7 +703,6 @@ async function loadConfig(env) {
   cfg.uuid = String(cfg.uuid || '').toLowerCase();
   cfg.path = String(cfg.path || cfg.uuid).replace(/^\/+|\/+$/g, '');
   cfg.subUrl = String(cfg.subUrl || '').trim().replace(/^\/+|\/+$/g, '').replace(/\/sub$/, '');
-  delete cfg.fragment; delete cfg.fragmentParam;
   validateConfig(cfg);
   cfg.subToken = String(env.SUB_TOKEN || await signValue(cfg.uuid, 'CFNext/subscription/v1'));
   if (!/^[A-Za-z0-9_-]{32,128}$/.test(cfg.subToken)) throw new AppError(503, 'SUB_TOKEN 必须是 32–128 位字母、数字、下划线或连字符');
@@ -718,7 +714,7 @@ async function saveConfig(env, cfg) {
   if (!env.K || typeof env.K.put !== 'function') throw new AppError(503, '未绑定 KV K，无法保存配置');
   validateConfig(cfg);
   const clone = JSON.parse(JSON.stringify(cfg, (key, value) => key.startsWith('_') ? undefined : value));
-  for (const key of ['subToken','secretConfigured','lockedFields','version']) delete clone[key];
+  for (const key of Object.keys(clone)) if (!CONFIG_FIELDS.has(key)) delete clone[key];
   for (const [key, field] of Object.entries(ENV_FIELDS)) if (env[key] !== undefined && env[key] !== '') delete clone[field];
   clone.configVersion = uuidv4();
   await withTimeout(env.K.put('config', JSON.stringify(clone)), 5000, '配置写入超时');
@@ -823,7 +819,7 @@ async function getQuota(env, cfg) {
 }
 
 // ---------------------------------------------------------------------------
-// VLESS / Trojan 请求头解析
+// VLESS 请求头解析
 // ---------------------------------------------------------------------------
 function needBytes(data, length) { if (data.length < length) throw new AppError(400, '头部过短'); }
 function readAddress(data, view, offset, atyp) {
@@ -850,92 +846,11 @@ function parseVlessHeader(data) {
   if (!port) throw new AppError(400,'端口错误');
   return { command,port,addr:address.addr,uuid,headerLength:offset,earlyData:data.subarray(offset) };
 }
-function parseTrojanHeader(data) {
-  needBytes(data,60);
-  if (data[56]!==13 || data[57]!==10) throw new AppError(400,'Trojan 头格式错误');
-  const view=new DataView(data.buffer,data.byteOffset,data.byteLength);
-  const command=data[58], atyp=({1:1,3:2,4:3})[data[59]];
-  const address=readAddress(data,view,60,atyp);
-  let offset=60+address.len; needBytes(data,offset+4);
-  const port=view.getUint16(offset); offset+=2;
-  if (!port || data[offset]!==13 || data[offset+1]!==10) throw new AppError(400,'Trojan 地址格式错误');
-  return {command,port,addr:address.addr,password:TD.decode(data.subarray(0,56)),headerLength:offset+2};
-}
-function authenticateProxy(parsed, cfg, protocol) {
-  if (protocol==='trojan') {
-    if (!cfg.enableTrojan || !constantEqual(parsed.password, trojanPasswordHash(cfg.trojanPassword || cfg.uuid))) throw new AppError(403,'代理认证失败');
-  } else {
-    if (!(protocol==='xhttp' ? cfg.enableXhttp : cfg.enableVless) || !constantEqual(parsed.uuid,cfg.uuid.replace(/-/g,''))) throw new AppError(403,'代理认证失败');
-  }
+function authenticateProxy(parsed, cfg, transport) {
+  if (!(transport==='xhttp' ? cfg.enableXhttp : cfg.enableVless) || !constantEqual(parsed.uuid,cfg.uuid.replace(/-/g,''))) throw new AppError(403,'代理认证失败');
   if (parsed.command !== 1) throw new AppError(400,'当前仅支持 TCP，请在客户端使用本地 DNS/DoH');
 }
 
-
-// Trojan 协议密码使用 SHA-224（56 字节 hex）——Cloudflare WebCrypto 不支持 SHA-224，手写实现（SHA-256 结构 + SHA-224 初始值）
-const SHA256_K = [
-  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
-];
-function sha224hex(str) {
-  const bytes = str instanceof Uint8Array ? str : TE.encode(String(str));
-  const bitLen = bytes.length * 8;
-  const paddedLen = (((bytes.length + 8) >> 6) + 1) << 6;
-  const data = new Uint8Array(paddedLen);
-  data.set(bytes);
-  data[bytes.length] = 0x80;
-  const dv = new DataView(data.buffer);
-  dv.setUint32(paddedLen - 8, Math.floor(bitLen / 0x100000000), false);   // SHA-2 大端 64 位长度
-  dv.setUint32(paddedLen - 4, bitLen >>> 0, false);
-  let h0 = 0xc1059ed8, h1 = 0x367cd507, h2 = 0x3070dd17, h3 = 0xf70e5939,
-      h4 = 0xffc00b31, h5 = 0x68581511, h6 = 0x64f98fa7, h7 = 0xbefa4fa4;
-  const rotr = (x, n) => (x >>> n) | (x << (32 - n));
-  for (let i = 0; i < paddedLen; i += 64) {
-    const w = new Uint32Array(64);
-    for (let j = 0; j < 16; j++) w[j] = dv.getUint32(i + j * 4, false);  // 大端读消息字
-    for (let j = 16; j < 64; j++) {
-      const s0 = rotr(w[j - 15], 7) ^ rotr(w[j - 15], 18) ^ (w[j - 15] >>> 3);
-      const s1 = rotr(w[j - 2], 17) ^ rotr(w[j - 2], 19) ^ (w[j - 2] >>> 10);
-      w[j] = (w[j - 16] + s0 + w[j - 7] + s1) >>> 0;
-    }
-    let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
-    for (let j = 0; j < 64; j++) {
-      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
-      const ch = (e & f) ^ (~e & g);
-      const t1 = (h + S1 + ch + SHA256_K[j] + w[j]) >>> 0;
-      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
-      const maj = (a & b) ^ (a & c) ^ (b & c);
-      const t2 = (S0 + maj) >>> 0;
-      h = g; g = f; f = e; e = (d + t1) >>> 0; d = c; c = b; b = a; a = (t1 + t2) >>> 0;
-    }
-    h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0; h2 = (h2 + c) >>> 0; h3 = (h3 + d) >>> 0;
-    h4 = (h4 + e) >>> 0; h5 = (h5 + f) >>> 0; h6 = (h6 + g) >>> 0; h7 = (h7 + h) >>> 0;
-  }
-  let hex = '';
-  for (const v of [h0, h1, h2, h3, h4, h5, h6]) {
-    hex += (v >>> 24 & 255).toString(16).padStart(2, '0');
-    hex += (v >>> 16 & 255).toString(16).padStart(2, '0');
-    hex += (v >>> 8 & 255).toString(16).padStart(2, '0');
-    hex += (v & 255).toString(16).padStart(2, '0');
-  }
-  return hex;
-}
-// Trojan 密码 SHA-224 摘要缓存：同一密码只计算一次，避免 WebSocket 每帧连接重复跑完整 SHA-224
-let _trojanPassC = '', _trojanHashC = '';
-function trojanPasswordHash(pass) {
-  if (pass !== _trojanPassC) { _trojanPassC = pass; _trojanHashC = sha224hex(pass); }
-  return _trojanHashC;
-}
-// Trojan 头判定（v1.0.5 修复）：56 字节 SHA224 hex + CRLF；密码匹配或纯 hex 特征均可识别
-function detectTrojan(pending, cfg) {
-  if (!pending || pending.length < 58) return false;
-  return /^[0-9a-fA-F]{56}\r\n$/.test(TD.decode(pending.subarray(0,58)));
-}
 
 // DoH 端点池（UDP/DNS → DoH 转换用；v1.0.5 修复：V2rayNG 关闭「本地 DNS」时远端 DNS 不可用）
 const DOH_ENDPOINTS = [
@@ -2016,7 +1931,7 @@ const OUTBOUND_PROXY_FALLBACK_MS = 2000;
 const OUTBOUND_PROXY_COOLDOWN_MS = 30000;
 
 // 出站代理连接真实目标；失败后复用未配置代理时的完整出站路径。
-async function openOutbound(parsed, cfg, colo, isVless) {
+async function openOutbound(parsed, cfg, colo) {
   const proxy = parseProxyAddress(cfg.outboundProxy);
   const mode = cfg.outboundMode || '';
   if (!proxy) {
@@ -2087,10 +2002,9 @@ async function openDirectOutbound(parsed, cfg, colo, skipDirect = false) {
     if (directResult) return directResult;
   }
 
-  // 3) 兜底内置地区反代（透明代理：发送去掉 VLESS/Trojan 头部的原始 TLS 数据，对端按 SNI 路由到目标）
+  // 3) 兜底内置地区反代（透明代理：发送去掉 VLESS 头部的原始 TLS 数据，对端按 SNI 路由到目标）
   //    多地区轮询：本地区域优先，失败后依次尝试其余区域；单个反代失效不再导致
-  //    （尤其 CF 托管站点直连被回环保护拦截时）流量为 0；VLESS / Trojan / XHTTP 均启用
-  //    （对齐 1.0.6：Trojan 无反代兜底时 Clash Verge 测速 gstatic.com 被回环保护拦截 → 节点全部超时）
+  //    （尤其 CF 托管站点直连被回环保护拦截时）流量为 0；VLESS WebSocket / XHTTP 均启用
   {
     const primary = selectRelayRegion(colo);
     const regions = [primary, ...Object.keys(RELAY_DOMAINS).filter(r => r !== primary)].slice(0, 3);
@@ -2122,7 +2036,7 @@ async function pumpToReader(reader, send, onDone) {
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket 代理（VLESS / Trojan）
+// WebSocket 代理（VLESS）
 // ---------------------------------------------------------------------------
 async function handleWebSocketProxy(request, cfg) {
   const earlyHeader=request.headers.get('Sec-WebSocket-Protocol')||'';
@@ -2153,19 +2067,17 @@ async function handleWebSocketProxy(request, cfg) {
     if(!ready) {
       pending=concatBytes(pending,chunk);
       if(pending.length>RESOURCE_LIMITS.bufferBytes) throw new Error('握手缓冲超限');
-      let parsed,protocol;
+      let parsed;
       try {
-        if(pending[0]!==0 && pending.length<58) return;
-        protocol=detectTrojan(pending,cfg)?'trojan':'vless';
-        parsed=protocol==='trojan'?parseTrojanHeader(pending):parseVlessHeader(pending);
+        parsed=parseVlessHeader(pending);
       }catch(e){if(e.message==='头部过短' && pending.length<=1024)return;throw e;}
-      authenticateProxy(parsed,cfg,protocol);
+      authenticateProxy(parsed,cfg,'ws');
       // 10 秒只约束客户端提交协议头；出站连接和兜底有各自的超时预算。
       clearTimeout(handshakeTimer);
-      socket=await openOutbound(parsed,cfg,request.cf?.colo,protocol==='vless');
+      socket=await openOutbound(parsed,cfg,request.cf?.colo);
       if(closed){closeSocket(socket);return;}
       writer=socket.writable.getWriter();reader=socket.readable.getReader();
-      if(protocol==='vless')send(new Uint8Array([0,0]));
+      send(new Uint8Array([0,0]));
       if(socket._preamble?.length)send(socket._preamble);
       if(pending.length>parsed.headerLength)await withTimeout(writer.write(pending.subarray(parsed.headerLength)),15000,'写入超时');
       pending=new Uint8Array(0);ready=true;clearTimeout(handshakeTimer);
@@ -2203,7 +2115,7 @@ async function handleXhttpProxy(request,cfg) {
       }
     })(),10000,'协议头读取超时');
     authenticateProxy(parsed,cfg,'xhttp');
-    conn=await openOutbound(parsed,cfg,request.cf?.colo,true);
+    conn=await openOutbound(parsed,cfg,request.cf?.colo);
     if(closed || request.signal.aborted){closeSocket(conn);throw new AppError(499,'客户端已断开');}
     writer=conn.writable.getWriter();reader=conn.readable.getReader();
     if(pending.length>parsed.headerLength)await withTimeout(writer.write(pending.subarray(parsed.headerLength)),15000,'写入超时');
@@ -2626,10 +2538,10 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
           boundedSet(DNH_CACHE,ck,{t:now,ips:rec});
           return rec.slice();
         }
-        // vless/trojan 订阅行提取（子订阅/转换器输出）：vless://uuid@host:port#名称
+        // VLESS 订阅行提取：vless://uuid@host:port#名称
         for (const line of content.split(/\r?\n/)) {
           if (rec.length >= limitPerDomain) break;
-          const vm = line.match(/(?:vless|trojan):\/\/[^@\s/]+@(\[[0-9a-fA-F:]+\]|[A-Za-z0-9.-]+)(?::(\d{1,5}))?/);
+          const vm = line.match(/^\s*vless:\/\/[^@\s/]+@(\[[0-9a-fA-F:]+\]|[A-Za-z0-9.-]+)(?::(\d{1,5}))?/);
           if (!vm) continue;
           const host = vm[1].replace(/^\[|\]$/g, '');
           const port = vm[2] ? parseInt(vm[2]) : 443;
@@ -2646,6 +2558,8 @@ async function resolvePreferredDomains(domainsStr, limitPerDomain = 100, maxTota
         // 纯文本行：IP / IP:端口 / IP:端口#名称（如 bestcf 的 "IP:端口#地区随机 | 香港 HK | HKG | ..."）
         for (const raw of content.split(/\r?\n/)) {
           if (rec.length >= limitPerDomain) break;
+          // URI 由上方的 VLESS 解析器处理，其他协议不降级为普通 IP 行。
+          if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw.trim())) continue;
           const m = raw.match(/(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?(?:#([^\r\n]*))?/);
           if (!m) continue;
           const ip = m[1];
@@ -3715,9 +3629,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
         <div class="card">
           <h3><span class="tick"></span>协议开关</h3>
           <div class="proto-row"><label class="switch"><input type="checkbox" id="en-vless" checked><span class="sl"></span></label><span>VLESS 协议（默认开启）</span></div>
-          <div class="proto-row"><label class="switch"><input type="checkbox" id="en-trojan"><span class="sl"></span></label><span>Trojan 连接兼容（不加入订阅）</span></div>
           <div class="proto-row"><label class="switch"><input type="checkbox" id="en-xhttp"><span class="sl"></span></label><span>VLESS XHTTP（订阅中输出 type=xhttp）</span></div>
-          <div class="field" style="margin-top:12px"><label>Trojan 密码（留空使用 UUID）</label><input type="text" id="tp-pass" placeholder="Trojan 密码" autocomplete="off" oninput="onSecretInput('tp-pass')"><input type="hidden" id="tp-pass-clear" value=""><button type="button" class="btn sm" id="tp-pass-clear-btn" onclick="clearSecret('tp-pass')" style="margin-top:8px">清除已保存密码（保存后生效）</button></div>
         </div>
         <div class="card">
           <h3><span class="tick"></span>TLS 与传输</h3>
@@ -4225,7 +4137,6 @@ function protoText(){
   if (!CFG) return '—';
   var a = [];
   if (CFG.enableVless !== false) a.push('VLESS');
-  if (CFG.enableTrojan) a.push('Trojan');
   if (CFG.enableXhttp) a.push('XHTTP');
   return a.length ? a.join(' / ') : '未启用';
 }
@@ -4343,8 +4254,6 @@ function fillPort(pv){
 function fillForm(){
   if (!CFG) return;
   $('en-vless').checked = CFG.enableVless !== false;
-  $('en-trojan').checked = !!CFG.enableTrojan;
-  $('tp-pass').value = CFG.trojanPassword || '';
   $('en-xhttp').checked = !!CFG.enableXhttp;
   $('tls-only').checked = !!CFG.tlsOnly;
   $('alpn').value = CFG.alpn || '';
@@ -4391,7 +4300,7 @@ function fillForm(){
   $('a-host').value = CFG.host || '';
   $('a-cfid').value = CFG.cfAccountId || '';
   $('a-cftoken').value = CFG.cfApiToken || '';
-  [['a-admin','admin'],['a-cftoken','cfApiToken'],['s-outbound','outboundProxy'],['tp-pass','trojanPassword']].forEach(function(pair){var el=$(pair[0]);var locked=(CFG.lockedFields||[]).includes(pair[1]);var clear=$(pair[0]+'-clear');if(clear){clear.value='';$(pair[0]+'-clear-btn').disabled=locked || !(CFG.secretConfigured&&CFG.secretConfigured[pair[1]]);}el.placeholder=CFG.secretConfigured&&CFG.secretConfigured[pair[1]]?'已配置，留空保留；输入新值替换':'尚未配置';el.disabled=locked;});
+  [['a-admin','admin'],['a-cftoken','cfApiToken'],['s-outbound','outboundProxy']].forEach(function(pair){var el=$(pair[0]);var locked=(CFG.lockedFields||[]).includes(pair[1]);var clear=$(pair[0]+'-clear');if(clear){clear.value='';$(pair[0]+'-clear-btn').disabled=locked || !(CFG.secretConfigured&&CFG.secretConfigured[pair[1]]);}el.placeholder=CFG.secretConfigured&&CFG.secretConfigured[pair[1]]?'已配置，留空保留；输入新值替换':'尚未配置';el.disabled=locked;});
   [['a-uuid','uuid'],['a-path','path']].forEach(function(pair){$(pair[0]).disabled=(CFG.lockedFields||[]).includes(pair[1]);});
   $('s-proxyIP').value = CFG.proxyIP || '';
   $('s-outbound').value = CFG.outboundProxy || '';
@@ -4447,7 +4356,7 @@ function collectForm(){
     path: $('a-path').value.trim() || $('a-uuid').value.trim(),
     subUrl: $('a-suburl').value.trim(),
     admin: $('a-admin').value,
-    clearSecrets: [['a-cftoken','cfApiToken'],['s-outbound','outboundProxy'],['tp-pass','trojanPassword']].filter(function(p){return $(p[0]+'-clear')&&$(p[0]+'-clear').value==='1';}).map(function(p){return p[1];}),
+    clearSecrets: [['a-cftoken','cfApiToken'],['s-outbound','outboundProxy']].filter(function(p){return $(p[0]+'-clear')&&$(p[0]+'-clear').value==='1';}).map(function(p){return p[1];}),
     host: $('a-host').value.trim(),
     alpn: $('alpn').value,
     ech: $('ech-on').checked,
@@ -4462,8 +4371,6 @@ function collectForm(){
     cfApiToken: $('a-cftoken').value.trim(),
     quotaAuto: $('q-auto-on').checked,
     enableVless: $('en-vless').checked,
-    enableTrojan: $('en-trojan').checked,
-    trojanPassword: $('tp-pass').value,
     enableXhttp: $('en-xhttp').checked,
     proxyIP: $('s-proxyIP').value.trim(),
     outboundProxy: $('s-outbound').value.trim(),
@@ -4546,7 +4453,7 @@ function genUuid(){
 function exportConfig(){
   try {
     var data = collectForm();
-    ['admin','trojanPassword','outboundProxy','cfApiToken','clearSecrets'].forEach(function(key){delete data[key];});
+    ['admin','outboundProxy','cfApiToken','clearSecrets'].forEach(function(key){delete data[key];});
     var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     var a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -4960,7 +4867,7 @@ async function handleRequest(request,env){
   }
   const upgrade=(request.headers.get('Upgrade')||'').toLowerCase();
   if(isProxy&&upgrade==='websocket'){
-    if(!cfg.enableVless&&!cfg.enableTrojan)throw new AppError(403,'WebSocket 协议已关闭');
+    if(!cfg.enableVless)throw new AppError(403,'WebSocket 协议已关闭');
     return handleWebSocketProxy(request,cfg);
   }
   if(isProxy&&request.method==='POST'){
@@ -5013,7 +4920,7 @@ async function handleRequest(request,env){
     if(request.method!=='POST')throw new AppError(405,'仅支持 POST');
     // Reset only ordinary settings. Authentication and routing must survive the reset.
     const reset={...JSON.parse(JSON.stringify(DEFAULT_CONFIG))};
-    for(const key of ['uuid','path','admin','trojanPassword','outboundProxy','cfApiToken','cfAccountId','subUrl'])reset[key]=cfg[key];
+    for(const key of ['uuid','path','admin','outboundProxy','cfApiToken','cfAccountId','subUrl'])reset[key]=cfg[key];
     await saveConfig(env,reset);
     return json({ok:true,msg:'普通配置已重置，访问凭据和路径保留'});
   }

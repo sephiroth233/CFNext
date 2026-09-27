@@ -4,7 +4,7 @@ CFNext 是部署在 Cloudflare Workers / Pages 上的单文件代理与订阅管
 
 ## 功能
 
-- 支持 VLESS / Trojan WebSocket 和 VLESS XHTTP。
+- 支持 VLESS WebSocket 和 VLESS XHTTP。
 - 仅生成 UTF-8 明文 VLESS 订阅（每行一个 `vless://` 链接），支持预览、复制、二维码和下载。
 - 管理优选 IP、域名来源、节点筛选与数量上限。
 - 支持 SOCKS5、HTTP/HTTPS CONNECT 和 Shadowsocks 出站代理。
@@ -40,8 +40,6 @@ CFNext 是部署在 Cloudflare Workers / Pages 上的单文件代理与订阅管
 | `D` | 可选，仅自定义管理面板路径 |
 | `HOST` | 可选，订阅节点的 SNI/Host；默认使用当前访问域名 |
 | `SUB_TOKEN` | 可选，独立订阅令牌，32–128 位字母、数字、下划线或连字符；未设置时由 UUID 派生 |
-| `TROJAN` | 可选，设为 `true` 或 `1` 启用 Trojan |
-| `TROJAN_PASSWORD` | 可选，Trojan 独立密码；留空使用 UUID |
 | `S` | 可选，出站代理地址，支持 `socks5://`、`http://`、`https://`、`ss://` |
 | `PROXYIP` | 可选，自定义透明中继地址，可带端口 |
 
@@ -54,7 +52,9 @@ CFNext 是部署在 Cloudflare Workers / Pages 上的单文件代理与订阅管
 3. 回到仪表盘，复制明文 VLESS 订阅链接并导入支持此格式的客户端。
 4. 在客户端更新订阅并测试节点，按实际网络情况选择使用。
 
-默认订阅地址为 `/s/<订阅令牌>/sub`，具体链接直接从面板复制。订阅包含连接凭据，请勿公开分享。订阅只包含已启用的 VLESS WebSocket / VLESS XHTTP 节点，不包含分流规则，也不按客户端或 User-Agent 转换格式。Trojan 连接兼容仍可开启，但不会生成 Trojan 订阅节点。
+默认订阅地址为 `/s/<订阅令牌>/sub`，具体链接直接从面板复制。订阅包含连接凭据，请勿公开分享。订阅只包含已启用的 VLESS WebSocket / VLESS XHTTP 节点，不包含分流规则，也不按客户端或 User-Agent 转换格式。
+
+旧版 Trojan 协议、开关及密码配置已移除。KV 中的旧字段会在加载时忽略，并在下次保存配置时清除；已有 Trojan 客户端连接需要改用 VLESS。
 
 旧版带 `/clash`、`/singbox`、`/plain` 等格式后缀的订阅地址已移除，请从面板重新复制无格式后缀的订阅地址。
 
