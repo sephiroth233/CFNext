@@ -67,320 +67,6 @@ async function checkUpdate(env) {
   } catch { return { ...base, error: '更新检测失败，请检查配置的仓库、分支和文件' }; }
 }
 
-const CLASH_TEMPLATE = `
-# ==================== 锚点配置 ====================
-# 代理提供者模板 - 订阅源基础配置
-
-# 节点筛选正则表达式 - 仅保留常用地区
-FilterHK: &FilterHK '^(?=.*(?i)(港|🇭🇰|HK|Hong|HKG))(?!.*5x).*$'
-FilterSG: &FilterSG '^(?=.*(?i)(坡|🇸🇬|SG|Sing|SIN|XSP))(?!.*5x).*$'
-FilterJP: &FilterJP '^(?=.*(?i)(日|🇯🇵|JP|Japan|NRT|HND|KIX|CTS|FUK))(?!.*(尼日利亚|5x)).*$'
-FilterUS: &FilterUS '^(?=.*(?i)(美|🇺🇸|US|USA|JFK|SJC|LAX|ORD|ATL|DFW|SFO|MIA|SEA|IAD))(?!.*(Plus|Australia|5x)).*$'
-# 注意：🇼🇸 是萨摩亚旗帜，不是台湾，已移除，避免误匹配
-FilterTW: &FilterTW '^(?=.*(?i)(台|🇹🇼|TW|tai|TPE|TSA|KHH))(?!.*5x).*$'
-
-# ==================== 监听器 ====================
-listeners:
-  # Shadowsocks监听器 - 远程连接家庭网络，端口和密码使用时请修改（默认密码请勿用于公网）
-  - {name: SS-IN,  type: shadowsocks, listen: '::', port: 10000, udp: true, password: Xf3#Lp9WqZ, cipher: aes-256-gcm}
-  # Mixed监听器 - 分地区专用端口 玩法：本地浏览器插件或手机APP配置代理，实现分地区访问
-  - {name: MIXED-SG, type: mixed, port: 50000, proxy: 新加坡节点}
-  - {name: MIXED-US, type: mixed, port: 50001, proxy: 美国节点}
-  - {name: MIXED-TW, type: mixed, port: 50002, proxy: 台湾节点}
-  - {name: MIXED-HK, type: mixed, port: 50003, proxy: 香港节点}
-  - {name: MIXED-JP, type: mixed, port: 50004, proxy: 日本节点}
-  - {name: MIXED-AL, type: mixed, port: 50007, proxy: 一键连接}
-
-# ==================== 核心配置 ====================
-mode: rule
-port: 7890
-socks-port: 7891
-redir-port: 7892
-mixed-port: 7893
-tproxy-port: 7895
-ipv6: true
-allow-lan: true
-unified-delay: true
-tcp-concurrent: true
-log-level: warning
-bind-address: '*'
-find-process-mode: 'always'
-keep-alive-interval: 15
-keep-alive-idle: 600
-
-# 认证配置（默认凭据请务必修改！）
-authentication:
-  - mihomo:yyds666
-skip-auth-prefixes:
-  - 192.168.1.0/24
-  - 192.168.31.0/24
-  - 192.168.100.0/24
-  - 127.0.0.1/8
-
-# 实验性功能
-experimental:
-  quic-go-disable-gso: true
-
-# 管理面板配置
-external-ui-url: https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip
-external-ui-name: zashboard
-external-ui: ui
-external-controller: 127.0.0.1:9090
-secret: yyds666    # 请修改为自定义密钥
-# 允许网页面板跨域访问
-external-controller-cors:
-  allow-origins:
-    - "*"
-  allow-private-network: true
-
-# 配置存储
-profile:
-  store-selected: true
-  store-fake-ip: true
-
-# 流量嗅探
-sniffer:
-  enable: true
-  force-dns-mapping: true   # 强制 DNS 映射，提高分流准确度
-  parse-pure-ip: true       # 解析纯 IP 连接
-  override-destination: true
-  sniff:
-    HTTP:
-      ports: [80, 8080-8880]
-    TLS:
-      ports: [443, 8443]
-    QUIC:
-      ports: [443, 8443]
-  skip-domain:
-    - "+.push.apple.com"
-
-# TUN模式配置
-tun:
-  enable: false
-  stack: mixed
-  mtu: 1480
-  dns-hijack:
-    - "any:53"
-    - "tcp://any:53"
-  udp-timeout: 300
-  auto-route: true
-  strict-route: true
-  auto-redirect: true
-  auto-detect-interface: true
-  # 提示：系统级防泄露的最强手段是开启 TUN（自动劫持全部 DNS 流量）；
-  # 不开 TUN 时，请把系统 / LAN 设备的 DNS 指向 127.0.0.1:53（本机）或本机局域网 IP:53。
-
-hosts:
-  miwifi.com: 192.168.31.2
-  "epdg.epc.mnc010.mcc234.pub.3gppnetwork.org": [87.194.8.8, 87.194.88.8, 87.194.89.8, 87.194.9.8]
-  services.googleapis.cn: services.googleapis.com
-  cn.bing.com: www4.bing.com
-
-# ==================== DNS 配置 ====================
-# 防泄露要点：
-#   1) respect-rules: true：DNS 服务器连接遵循路由规则（国外 DoH 走代理隧道、国内 DoH 直连），
-#      解析行为与规则分流一致，避免“规则走代理、解析却直连”的泄露。
-#   2) 默认 nameserver 用国内 DoH；只有“将走代理”的规则集才用国外 DoH，
-#      且其域名在 rules 中显式固定走代理。
-#   3) fake-ip-filter 补齐系统连通性检测 / 时间同步 / 运营商登录等域名，防止系统误判断网而回退运营商 DNS。
-dns:
-  enable: true
-  listen: 0.0.0.0:53        # 本机 / LAN 设备可把 DNS 指向此地址，避免走运营商 DNS
-  ipv6: true
-  prefer-h3: false          # respect-rules 下官方不推荐 DoH3；且 QUIC 已被规则拦截
-  cache-algorithm: arc      # 性能更优的 ARC 缓存算法
-  cache-size: 4096
-  enhanced-mode: fake-ip
-  fake-ip-range: 198.18.0.1/16
-  fake-ip-filter:
-    - "+.lan"
-    - "+.local"
-    - "+.localhost"
-    - "+.home.arpa"
-    - "+.internal"
-    # 系统连通性检测（防止 fake-ip 导致“无网络”判断，回退 ISP DNS 造成泄露）
-    - "+.msftconnecttest.com"
-    - "+.msftncsi.com"          # 通配已覆盖 dns.msftncsi.com
-    - "captive.apple.com"
-    - "connectivitycheck.gstatic.com"
-    - "detectportal.firefox.com"
-    # 时间同步
-    - "time.nist.gov"
-    - "+.pool.ntp.org"
-    - "time.*.com"              # 通配已覆盖 time.windows.com
-    - "ntp.*.com"               # 通配已覆盖 ntp.ubuntu.com
-    # 运营商 Wi-Fi 登录页
-    - "+.cmpassport.com"
-    - "id6.me"
-    - "open.e.189.cn"
-    - "mdn.open.wo.cn"
-    - "opencloud.wostore.cn"
-    - "auth.wosms.cn"
-    - "+.10099.com.cn"
-    # 原配置保留项
-    - "+.market.xiaomi.com"
-    - "+.pub.3gppnetwork.org"
-    - "+.push.apple.com"
-    - "+.bing.com"
-    - "+.miwifi.com"
-    - "+.docker.io"
-    # 国内应用登录（+.qq.com 已覆盖 localhost.ptlogin2.qq.com）
-    - "+.qq.com"
-    # 直连 / 国内类规则集：返回真实 IP
-    - rule-set:Direct
-    - rule-set:Private
-    - rule-set:China
-  use-hosts: true
-  respect-rules: true
-  # 引导用 DNS（解析 DoH/DoT 服务器自身的域名），必须是 IP
-  default-nameserver:
-    - 223.5.5.5
-    - 119.29.29.29
-  # 默认解析：未命中 nameserver-policy 的域名（国内 DoH，直连）
-  nameserver:
-    - "https://dns.alidns.com/dns-query"
-    - "https://doh.pub/dns-query"
-  # 直连出口的解析
-  direct-nameserver:
-    - "https://dns.alidns.com/dns-query"
-    - "https://doh.pub/dns-query"
-  # 解析代理节点域名（防套娃 / 防循环，用国内直连可达的 DoH）
-  proxy-server-nameserver:
-    - "https://dns.alidns.com/dns-query"
-    - "https://doh.pub/dns-query"
-  nameserver-policy:
-    # 广告域名直接返回空应答
-    "rule-set:Advertising,AWAvenueAds": rcode://success
-    # 直连类：国内 DoH（微软已并入直连，微软域名走国内解析后直连）
-    "rule-set:Direct,Private,China,Microsoft":
-      - "https://dns.alidns.com/dns-query"
-      - "https://doh.pub/dns-query"
-    # 走代理类：国外 DoH（连接本身经代理隧道，不直连暴露查询）
-    "rule-set:AI,Telegram,Twitter,SocialMedia,Netflix,YouTube,Spotify,TikTok,disney,Google,Proxy":
-      - "https://dns.google/dns-query"
-      - "https://cloudflare-dns.com/dns-query"
-
-# ==================== 代理策略组（9 个可见 + 6 个隐藏自动子组） ====================
-proxy-groups:
-  # 主入口：默认自动选择，可手动切换各地区 / 故障转移 / 全部节点 / 直接连接
-  - {name: 一键连接,     type: select, proxies: [自动选择, 故障转移, 香港节点, 台湾节点, 日本节点, 美国节点, 新加坡节点, 全部节点, 直接连接], icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Static.png}
-  # 自动选择：隐藏（面板不可手动选择），纯自动优选延时最低节点；故障转移：按序自动切换
-  - {name: 自动选择,     type: url-test, include-all: true, url: 'https://www.google.com/generate_204', interval: 200, lazy: true, hidden: true, empty-fallback: REJECT, icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Auto.png}
-  - {name: 故障转移,     type: fallback, proxies: [香港节点, 台湾节点, 日本节点, 美国节点, 新加坡节点, 全部节点], url: 'https://www.google.com/generate_204', interval: 200, lazy: true, empty-fallback: REJECT, icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/ULB.png}
-  # 常用地区节点组（select：默认选中“XX自动”=自动优选该地区最快节点，也可手动指定单个节点）
-  - {name: 香港节点,     type: select, include-all: true, filter: *FilterHK, proxies: [香港自动], icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Hong_Kong.png}
-  - {name: 台湾节点,     type: select, include-all: true, filter: *FilterTW, proxies: [台湾自动], icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Taiwan.png}
-  - {name: 日本节点,     type: select, include-all: true, filter: *FilterJP, proxies: [日本自动], icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Japan.png}
-  - {name: 美国节点,     type: select, include-all: true, filter: *FilterUS, proxies: [美国自动], icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/United_States.png}
-  - {name: 新加坡节点,   type: select, include-all: true, filter: *FilterSG, proxies: [新加坡自动], icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Singapore.png}
-  # 全部节点（手动挑选任意节点；首个选项“自动选择”=全部节点中最快）
-  - {name: 全部节点,     type: select, include-all: true, proxies: [自动选择], icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Global.png}
-  # 各地区自动优选子组（隐藏，作为各地区分组内的“自动选择”选项）
-  - {name: 香港自动,     type: url-test, include-all: true, filter: *FilterHK, url: 'https://www.google.com/generate_204', interval: 200, lazy: true, empty-fallback: REJECT, hidden: true, icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Auto.png}
-  - {name: 台湾自动,     type: url-test, include-all: true, filter: *FilterTW, url: 'https://www.google.com/generate_204', interval: 200, lazy: true, empty-fallback: REJECT, hidden: true, icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Auto.png}
-  - {name: 日本自动,     type: url-test, include-all: true, filter: *FilterJP, url: 'https://www.google.com/generate_204', interval: 200, lazy: true, empty-fallback: REJECT, hidden: true, icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Auto.png}
-  - {name: 美国自动,     type: url-test, include-all: true, filter: *FilterUS, url: 'https://www.google.com/generate_204', interval: 200, lazy: true, empty-fallback: REJECT, hidden: true, icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Auto.png}
-  - {name: 新加坡自动,   type: url-test, include-all: true, filter: *FilterSG, url: 'https://www.google.com/generate_204', interval: 200, lazy: true, empty-fallback: REJECT, hidden: true, icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Auto.png}
-  # 直连分组（放在最下方）
-  - {name: 直接连接,     type: select, proxies: [DIRECT], icon: https://github.com/Koolson/Qure/raw/master/IconSet/Color/Direct.png}
-
-# ==================== 规则路由 ====================
-rules:
-  # 广告拦截（常用：直接拒绝；如需临时放行可改为一键连接）
-  - RULE-SET,Tracking,REJECT
-  - RULE-SET,AWAvenueAds,REJECT
-  - RULE-SET,Advertising,REJECT
-
-  # DNS 服务器域名：解析通道固定，避免 DNS 流量走错路径（防泄露关键）
-  - DOMAIN-SUFFIX,alidns.com,直接连接
-  - DOMAIN-SUFFIX,doh.pub,直接连接
-  - DOMAIN,dns.google,一键连接
-  - DOMAIN,cloudflare-dns.com,一键连接
-
-  # 大陆直连优先（置于国外服务规则之前：大陆应用一律直连，不被国外服务规则集抢先命中）
-  - RULE-SET,Private,直接连接
-  - RULE-SET,Direct,直接连接
-  - RULE-SET,Download,直接连接
-  - RULE-SET,AppleCN,直接连接
-  - RULE-SET,Microsoft,直接连接        # 微软全家桶直连（Office / OneDrive / Windows 更新 / Teams / Xbox 等）
-  - RULE-SET,China,直接连接             # 国内域名直连
-  # 阻止走代理的 QUIC（强制回退 TCP，避免 QUIC 绕过代理 / 被干扰）。
-  # 放在直连规则之后：直连 QUIC（大陆 / 微软 / 苹果）不受影响。如需 Telegram 语音等 UDP，可删除此行。
-  - AND,((DST-PORT,443),(NETWORK,UDP)),REJECT
-
-  # 常用国外服务（统一走一键连接）
-  - RULE-SET,AI,一键连接
-  - RULE-SET,Telegram,一键连接
-  - RULE-SET,Twitter,一键连接
-  - RULE-SET,SocialMedia,一键连接
-  - RULE-SET,Netflix,一键连接
-  - RULE-SET,YouTube,一键连接
-  - RULE-SET,Spotify,一键连接
-  - RULE-SET,TikTok,一键连接
-  - RULE-SET,disney,一键连接
-  - RULE-SET,Google,一键连接
-  - RULE-SET,github,一键连接
-  - RULE-SET,Proxy,一键连接
-
-  # IP规则
-  - RULE-SET,PrivateIP,直接连接,no-resolve
-  - RULE-SET,TelegramIP,一键连接,no-resolve
-  - RULE-SET,ProxyIP,一键连接,no-resolve
-  - RULE-SET,ChinaIP,直接连接,no-resolve
-
-  # 大陆 IP 兜底直连：覆盖规则集未收录的域名 / 纯 IP 连接的大陆应用（GEOIP 库覆盖面更全）
-  - GEOIP,CN,直接连接,no-resolve
-
-  # 兜底规则：其余（国外）走一键连接
-  - MATCH,一键连接
-
-# ==================== 规则集 ====================
-# 规则集行为模板
-BehaviorDN: &BehaviorDN {type: http, behavior: domain, format: mrs, interval: 86400}
-BehaviorDY: &BehaviorDY {type: http, behavior: domain, format: yaml, interval: 86400}
-BehaviorIP: &BehaviorIP {type: http, behavior: ipcidr, format: mrs, interval: 86400}
-ClassicalYaml: &ClassicalYaml {type: http, behavior: classical, interval: 3600, format: yaml, proxy: DIRECT}
-BehaviorCL: &BehaviorCL {type: http, behavior: classical, interval: 86400, format: yaml, proxy: DIRECT}   # 经典规则集（blackmatrix7 等，DOMAIN/DOMAIN-SUFFIX/DOMAIN-KEYWORD/PROCESS-NAME）
-
-# 规则提供者（仅保留常用）
-rule-providers:
-  # 广告
-  Tracking:       {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Tracking.mrs}
-  Advertising:    {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Advertising.mrs}
-  AWAvenueAds:    {<<: *BehaviorDY, url: https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Clash.yaml}
-  # 直连 / 国内
-  Direct:         {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Direct.mrs}
-  Private:        {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Private.mrs}
-  Download:       {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Download.mrs}
-  AppleCN:        {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/AppleCN.mrs}
-  China:          {<<: *BehaviorCL, url: https://cdn.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/ChinaMaxNoIP/ChinaMaxNoIP_No_Resolve.yaml}   # 大陆直连全量：ChinaMaxNoIP（11万+ 域名，含大陆可达国际服务），每日更新
-  # 常用国外服务
-  AI:             {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/AI.mrs}
-  Telegram:       {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Telegram.mrs}
-  Twitter:        {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Twitter.mrs}
-  SocialMedia:    {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/SocialMedia.mrs}
-  Netflix:        {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Netflix.mrs}
-  YouTube:        {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/YouTube.mrs}
-  Google:         {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Google.mrs}
-  Microsoft:      {<<: *BehaviorCL, url: https://cdn.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/Microsoft/Microsoft.yaml}   # 微软全家桶全量：blackmatrix7（Office/OneDrive/Xbox/Teams/Skype/Bing/Azure 等）
-  Proxy:          {<<: *BehaviorDN, url: https://github.com/666OS/rules/raw/release/mihomo/domain/Proxy.mrs}
-  # 媒体（DustinWin）
-  Spotify:        {<<: *BehaviorDN, url: https://github.com/DustinWin/ruleset_geodata/releases/download/mihomo-ruleset/spotify.mrs}
-  TikTok:         {<<: *BehaviorDN, url: https://github.com/DustinWin/ruleset_geodata/releases/download/mihomo-ruleset/tiktok.mrs}
-  disney:         {<<: *BehaviorDN, url: https://github.com/DustinWin/ruleset_geodata/releases/download/mihomo-ruleset/disney.mrs}
-  # GitHub
-  github:          {<<: *ClassicalYaml, url: https://rule.kelee.one/Clash/GitHub.yaml}
-  # IP规则
-  PrivateIP:      {<<: *BehaviorIP, url: https://github.com/666OS/rules/raw/release/mihomo/ip/Private.mrs}
-  TelegramIP:     {<<: *BehaviorIP, url: https://github.com/666OS/rules/raw/release/mihomo/ip/Telegram.mrs}
-  ProxyIP:        {<<: *BehaviorIP, url: https://github.com/666OS/rules/raw/release/mihomo/ip/Proxy.mrs}
-  ChinaIP:        {<<: *BehaviorIP, url: https://github.com/666OS/rules/raw/release/mihomo/ip/China.mrs}
-
-# ==================== EOF ====================
-
-`;
-
-
 // ---------------------------------------------------------------------------
 // 常量
 // ---------------------------------------------------------------------------
@@ -497,7 +183,7 @@ const DEFAULT_CONFIG = {
   echDns: '',                      // 自定义 ECH DNS：客户端获取 ECH 配置的 DoH 地址（留空用默认 223.5.5.5）
   tlsOnly: false,       // TLS 控制：关闭下发全部节点，开启仅下发 TLS 端口节点
   nodeLimit: true,      // 节点数量控制：默认开启，按 nodeLimitCount 精确限制节点总数
-  nodeLimitCount: 300,  // 总节点上限；结构化格式还受 300 条硬上限约束
+  nodeLimitCount: 300,  // 总节点上限；明文订阅最多 800 条
   polling: false,       // 每 15 分钟按配置版本和客户端标识轮换顺序，不写 KV；始终遵守数量上限
   probeAlive: false,    // ★ 节点测活（TCP 探测）总开关：默认关闭（推荐，对齐 V1.0.6）——订阅不做任何 TCP 握手/HTTP 探测与剔除，
                         //   按数据源原始顺序全量下发、客户端自行择优（秒回，v2rayNG/AsteriskNG 刷新正常）；面板开启或 PROBE_ALIVE=1 强制开启。
@@ -2726,8 +2412,7 @@ async function runLatencyTest(candidates, threads, timeout) {
 // ---------------------------------------------------------------------------
 // XHTTP Padding（XHTTP Extra）参数：xPadding 混淆参数，客户端与服务端约定一致。
 // header/key 两项由 UUID 内部切片派生（slice(1,7) / '_'+slice(25,31)），
-// 其余三项为固定混淆策略。V2rayN（extra JSON，camelCase）与 mihomo
-// （xhttp-opts，kebab-case）共用同一份派生结果。
+// 其余三项为固定混淆策略，通过 VLESS URI 的 extra JSON 参数输出。
 function xhttpPadding(cfg) {
   const u = cfg.uuid || '';
   return {
@@ -2736,7 +2421,7 @@ function xhttpPadding(cfg) {
   };
 }
 
-// vless/trojan 分享链接 # 后的节点名：非 ASCII（中文等）原样输出、不做 URL 编码，仅转义 URI 特殊字符（% # ? 空格）。
+// VLESS 分享链接 # 后的节点名：非 ASCII（中文等）原样输出、不做 URL 编码，仅转义 URI 特殊字符（% # ? 空格）。
 // 原因：v2rayNG/AsteriskNG 对 fragment 的 %XX 按系统编码（GBK）做 URL 解码，UTF-8 编码的中文（%E9%A6...）会被误读成乱码
 // （如 香港 → 棣欐腐、台湾 → 鋆版咕）；原样中文走明文 UTF-8，GBK/UTF-8 解码客户端均正常显示。
 function uriFragName(name) {
@@ -2769,21 +2454,6 @@ function vlessNode(cfg, server, port, name, extra = {}) {
     q += '&ech=' + enc((cfg.echHost || 'cloudflare-ech.com') + '+' + (cfg.echDns || 'https://223.5.5.5/dns-query'));
   }
   return `vless://${cfg.uuid}@${addr}:${port}?${q}#${uriFragName(name)}`;
-}
-
-function trojanNode(cfg, server, port, name) {
-  const host = cfg.host;
-  const addr = server.includes(':') && !server.startsWith('[') ? `[${server}]` : server;  // IPv6 需方括号
-  const enc = encodeURIComponent;
-  const isTls = !HTTP_PORTS.has(Number(port));
-  // 明文端口（80/8080/8880/2052/2082/2086/2095）：走 security=none 明文 ws（不被 TLS 指纹检测，可用性高）；
-  // TLS 端口：security=tls + sni/fp
-  let q = isTls
-    ? 'security=tls&sni=' + enc(host) + '&fp=chrome&host=' + enc(host) + '&type=ws&path=' + enc(proxyPath(cfg))
-    : 'security=none&host=' + enc(host) + '&type=ws&path=' + enc(proxyPath(cfg));
-  if (cfg.alpn && isTls) q += '&alpn=' + enc(cfg.alpn);
-  if (cfg.ech && isTls) q += '&ech=' + enc((cfg.echHost || 'cloudflare-ech.com') + '+' + (cfg.echDns || 'https://223.5.5.5/dns-query'));   // ECH：仅 TLS 端口有效
-  return `trojan://${cfg.trojanPassword || cfg.uuid}@${addr}:${port}?${q}#${uriFragName(name)}`;
 }
 
 // 优选域名 / 优选 API 的 DNS 解析缓存（TTL 10 分钟：域名或 URL → IP 列表）
@@ -3111,7 +2781,6 @@ async function buildNodes(cfg, cap = 800, skipSet = null) {
     // 不做 TLS 端口随机（443 全域可达性最佳），也不追加明文端口变体
     const finalPort = Number(port);
     if (cfg.enableVless) nodes.push(vlessNode(cfg, server, finalPort, name));
-    if (cfg.enableTrojan) nodes.push(trojanNode(cfg, server, isTls ? finalPort : Number(port), name));  // Trojan 明文/TLS 端口均下发
     if (cfg.enableXhttp && isTls) nodes.push(vlessNode(cfg, server, finalPort, name, { type: 'xhttp' }));  // XHTTP 仅 TLS 端口
   };
   // 单端口下发（1.0.6 机制，方案 B）：每个地址按源端口（通常 443）单条下发，不追加明文端口变体
@@ -3126,7 +2795,7 @@ async function buildNodes(cfg, cap = 800, skipSet = null) {
       if (lim > 0) n = Math.min(Math.max(n, lim), cap);
     }
     // 数量 = 下发节点总数（含启用的所有协议），而非 IP 数：每个 IP 生成一条后计数，达 n 即止
-    const protoCount = (cfg.enableVless ? 1 : 0) + (cfg.enableTrojan ? 1 : 0) + (cfg.enableXhttp ? 1 : 0) || 1;
+    const protoCount = (cfg.enableVless ? 1 : 0) + (cfg.enableXhttp ? 1 : 0) || 1;
     let made = 0;
     // 去重下发：随机模式生成 3 倍数量后过滤已下发 IP；新 IP 排前、已下发 IP 紧随补齐，节点总量恒定
     const randPool = randomIPsFromCidrs(RAND_CIDRS, Math.ceil(n / protoCount) * 3);
@@ -3140,8 +2809,6 @@ async function buildNodes(cfg, cap = 800, skipSet = null) {
       if (made >= n) break;
       // 随机优选模式：按 1.0.6 机制——每个 IP 每协议仅固定 443 单端口下发，不随机 TLS 端口、不追加明文端口变体
       if (cfg.enableVless) { nodes.push(vlessNode(cfg, ip, 443, '随机优选-' + String(made + 1).padStart(2, '0'))); made++; }
-      if (made >= n) break;
-      if (cfg.enableTrojan) { nodes.push(trojanNode(cfg, ip, 443, '随机优选-' + String(made + 1).padStart(2, '0'))); made++; }
       if (made >= n) break;
       if (cfg.enableXhttp) { nodes.push(vlessNode(cfg, ip, 443, '随机优选-' + String(made + 1).padStart(2, '0'), { type: 'xhttp' })); made++; }
     }
@@ -3243,41 +2910,6 @@ function parseNodeServer(n) {
   return { host: auth, port: 443 };
 }
 
-// 轻量查询参数提取：从分享链接字符串提取指定参数（替代 new URL().searchParams，避免 URL 对象开销与 GC 压力）
-function getParam(n, key) {
-  const q = n.indexOf('?');
-  if (q < 0) return null;
-  const hash = n.indexOf('#', q);
-  const seg = (hash > q ? n.slice(q + 1, hash) : n.slice(q + 1));
-  for (const pair of seg.split('&')) {
-    const eq = pair.indexOf('=');
-    const k = eq > 0 ? pair.slice(0, eq) : pair;
-    if (k === key) return eq > 0 ? decodeURIComponent(pair.slice(eq + 1)) : '';
-  }
-  return null;
-}
-
-// 解析分享链接为统一节点信息（五个客户端生成器共用；纯字符串解析，无 new URL 对象开销）
-function parseShareNode(n, i) {
-  const { host: srvRaw, port: prt } = parseNodeServer(n);
-  // IPv6 以裸地址传递：Clash/Sing-box/Surge/Loon 的 server 字段端口均为独立字段/逗号分隔，要求裸 IPv6；
-  // 仅 vless URI（生成处单独加方括号）与 QuanX（ip:port 格式，生成处补方括号）需要 [ip] 形式
-  const srv = srvRaw;
-  const hashIdx = n.indexOf('#');
-  let name = `节点${i + 1}`;
-  if (hashIdx >= 0) { try { name = decodeURIComponent(n.slice(hashIdx + 1)) || name; } catch (e) { /* 忽略非法编码 */ } }
-  const at = n.indexOf('@');
-  let user = '';
-  if (at >= 0) {
-    const proto = n.indexOf('://');
-    const start = proto >= 0 ? proto + 3 : 0;
-    try { user = decodeURIComponent(n.slice(start, at)); } catch (e) { user = n.slice(start, at); }
-  }
-  const isTrojan = n.startsWith('trojan://');
-  const tls = isTrojan || (getParam(n, 'security') || 'tls') === 'tls';
-  return { srv, prt, name, user, isTrojan, tls };
-}
-
 // 运营商标签仍按名称匹配；地区使用解析后的国家/地区码。
 const ISP_TAGS = { 移动: ['移动', 'CM', 'CHINAMOBILE'], 联通: ['联通', 'CU', 'UNICOM'], 电信: ['电信', 'CT', 'CHINATELECOM'] };
 const FILTER_ISPS = ['移动', '联通', '电信'];
@@ -3334,355 +2966,6 @@ function filterNodes(nodes, filter, regionByEndpoint) {
   if (!out.length) out = apply(region, FILTER_IPTYPES, FILTER_ISPS);  // 放宽 ipType
   if (!out.length) out = apply('all', FILTER_IPTYPES, FILTER_ISPS);   // 放宽 region
   return out;
-}
-
-// ---------- Clash YAML ----------
-// YAML 标量值序列化（裸值或 JSON 字符串，避免特殊字符破坏 YAML）
-function yamlVal(v) {
-  if (typeof v === 'boolean' || typeof v === 'number') return String(v);
-  const s = String(v);
-  return /^[\w.\-/\u4e00-\u9fa5]+$/.test(s) ? s : JSON.stringify(s);
-}
-// 单个 Clash 代理块模板化生成（固定结构，800 节点级订阅生成耗时降低一个数量级）
-function clashProxyYaml(p) {
-  const L = [];
-  L.push('  - name: ' + yamlVal(p.name));
-  L.push('    type: ' + p.type);
-  L.push('    server: ' + yamlVal(p.server));
-  L.push('    port: ' + p.port);
-  if (p.type === 'vless') L.push('    uuid: ' + yamlVal(p.uuid));
-  else L.push('    password: ' + yamlVal(p.password));
-  L.push('    network: ' + p.network);
-  L.push('    udp: true');
-  if (p.tls) {
-    L.push('    tls: true');
-    L.push('    skip-cert-verify: false');   // 使用部署域名作为 SNI 并验证证书
-    // ALPN：ws/trojan 强制 HTTP/1.1（CF Worker 的 WebSocket 仅支持 HTTP/1.1 升级，mihomo utls(chrome) 默认 ALPN 含 h2 → WS 升级失败）；
-    // xhttp 必须 h2（stream-one 依赖 HTTP/2 双向流，h1.1 请求体未发完 CF 边缘无法回传响应 → Clash Verge 节点全部超时）
-    L.push(p.network === 'xhttp' ? '    alpn: [h2]' : '    alpn: [http/1.1]');
-    L.push('    servername: ' + yamlVal(p.servername));
-    if (p.type === 'trojan') L.push('    sni: ' + yamlVal(p.servername));   // mihomo trojan 只认 sni 字段（servername 被忽略）：CF 优选 IP 下缺 sni 时 TLS SNI 回落为 server(IP)，Go/utls 对 IP 型 ServerName 不发送 SNI 扩展 → CF 边缘无法路由 → 403 → Clash Verge 全 Error
-    L.push('    client-fingerprint: chrome');
-    if (p['ech-opts']) {
-      L.push('    ech-opts:');
-      L.push('      enable: ' + yamlVal(p['ech-opts'].enable));
-      L.push('      query-server-name: ' + yamlVal(p['ech-opts']['query-server-name']));
-    }
-  }
-  if (p.network === 'ws') {
-    L.push('    ws-opts:');
-    L.push('      path: ' + yamlVal(p['ws-opts'].path));
-    L.push('      headers:');
-    L.push('        Host: ' + yamlVal(p['ws-opts'].headers.Host));
-  } else if (p.network === 'xhttp') {
-    const xo = p['xhttp-opts'];
-    L.push('    xhttp-opts:');
-    L.push('      path: ' + yamlVal(xo.path));
-    L.push('      mode: ' + yamlVal(xo.mode));
-    // 修复：mihomo 规范中 XHTTP 请求主机字段名为 host（headers.Host 是错误写法，
-    // 会导致 Nekobox 等客户端把 'Host: 域名' 整行误导入 XHTTP 标头导致节点报错）
-    L.push('      host: ' + yamlVal(xo.host));
-    L.push('      x-padding-obfs-mode: ' + yamlVal(xo['x-padding-obfs-mode']));
-    L.push('      x-padding-method: ' + yamlVal(xo['x-padding-method']));
-    L.push('      x-padding-placement: ' + yamlVal(xo['x-padding-placement']));
-    L.push('      x-padding-header: ' + yamlVal(xo['x-padding-header']));
-    L.push('      x-padding-key: ' + yamlVal(xo['x-padding-key']));
-  }
-  return L.join('\n');
-}
-function generateClash(cfg, nodes) {
-  const host = cfg.host;
-  const path = proxyPath(cfg);
-  const seen = new Set();
-  // XHTTP 节点按 mihomo xhttp-opts 规范输出（含 x-padding 混淆参数），与 WS/Trojan 一并下发
-  const proxies = nodes.map((n) => {
-    const { user, srv, prt, name: baseName, isTrojan, tls } = parseShareNode(n, 0);
-    let name = baseName;
-    const xType = getParam(n, 'type') || 'ws';
-    // 同名去重：同一名称（同一 IP 多协议节点或不同 IP 同名优选池）追加协议后缀并保证全局唯一——
-    // 若后缀仍被占用（多个同名 IP 的 Trojan/XHTTP 节点），继续递增序号，避免 mihomo「duplicate name」校验失败
-    if (seen.has(name)) {
-      const suff = isTrojan ? 'T' : (xType === 'xhttp' ? 'X' : 'W');
-      let cand = name + '·' + suff;
-      let k = 2;
-      while (seen.has(cand)) { cand = name + '·' + suff + k; k++; }
-      name = cand;
-    }
-    seen.add(name);
-    const base = {
-      name, server: srv, port: prt, udp: true,
-      ...(tls ? { tls: true, 'skip-cert-verify': false, servername: host, 'client-fingerprint': 'chrome', alpn: ['http/1.1'] } : {}),
-      ...(cfg.ech && tls ? { 'ech-opts': { enable: true, 'query-server-name': cfg.echHost || 'cloudflare-ech.com' } } : {})   // 修复 #6：mihomo ECH 官方格式为顶层 ech-opts（enable + query-server-name），旧 tls-opts.ech 不被识别导致 ECH 未生效
-    };
-    if (isTrojan) {
-      return { ...base, type: 'trojan', password: user, network: 'ws', 'ws-opts': { path, headers: { Host: host } } };
-    }
-    if (xType === 'xhttp') {
-      // 从节点链接的 extra 参数恢复 x-padding 混淆配置（由 UUID 派生，与服务端一致）
-      let xo = {};
-      try { xo = JSON.parse(getParam(n, 'extra') || '{}'); } catch (e) { /* extra 解析失败则用空 */ }
-      return {
-        ...base, type: 'vless', uuid: user, network: 'xhttp',
-        alpn: ['h2'],   // 修复：xhttp stream-one 依赖 HTTP/2 双向流必须 h2（ws 节点才用 http/1.1）
-        'xhttp-opts': {
-          path,
-          mode: 'stream-one',
-          // 修复：mihomo 规范 XHTTP 主机字段为 host（headers.Host 会被 Nekobox 误读为标头）
-          host,
-          'x-padding-obfs-mode': xo.xPaddingObfsMode !== undefined ? xo.xPaddingObfsMode : true,
-          'x-padding-method': xo.xPaddingMethod || 'tokenish',
-          'x-padding-placement': xo.xPaddingPlacement || 'queryInHeader',
-          'x-padding-header': xo.xPaddingHeader || '',
-          'x-padding-key': xo.xPaddingKey || ''
-        }
-      };
-    }
-    return { ...base, type: 'vless', uuid: user, network: 'ws', 'ws-opts': { path, headers: { Host: host } } };
-  });
-  // 节点排序：443端口优先（非标准端口如8443在mihomo下HTTPS握手易被GFW干扰，放后面避免默认选中）
-  proxies.sort((a, b) => (a.port === 443 ? 0 : 1) - (b.port === 443 ? 0 : 1));
-  const yaml = `# CFNext 订阅
-test-url: 'http://www.gstatic.com/generate_204'
-proxies:
-${proxies.map(p => clashProxyYaml(p)).join('\n')}
-${CLASH_TEMPLATE}
-`;
-  return yaml;
-}
-
-// Surfboard（Surge 兼容格式，不支持 VLESS/XHTTP，Trojan 必须 TLS）：
-// 将 VLESS TLS 节点转换为 Trojan（密码=UUID，TLS/WS 参数一致），XHTTP 与明文端口节点过滤，
-// 输出 Surge 风格配置（[General]/[Proxy]/[Proxy Group]/[Rule]），Surfboard 直接导入
-function generateSurfboard(cfg, nodes) {
-  const host = cfg.host, path = proxyPath(cfg);
-  if (!cfg.enableTrojan) throw new AppError(400, 'Surfboard 需要先启用 Trojan');
-  const sb = [];
-  for (const n of nodes) {
-    if (n.startsWith('trojan://') && n.indexOf('security=none') < 0) sb.push(n);
-    else if (n.startsWith('vless://') && n.indexOf('type=xhttp') < 0 && n.indexOf('security=none') < 0)
-      sb.push(n.replace(/^vless:\/\/[^@]+@/, 'trojan://' + encodeURIComponent(cfg.trojanPassword || cfg.uuid) + '@').replace('encryption=none&', ''));
-  }
-  const lines = sb.map((n, i) => {
-    const { user, srv, prt, name } = parseShareNode(n, i);
-    return `${name} = trojan, ${srv}, ${prt}, password=${user}, ws=true, ws-path=${path}, ws-headers=Host:${host}, tls=true, skip-cert-verify=false, sni=${host}`;
-  });
-  return `#!MANAGED-CONFIG
-[General]
-loglevel = notify
-dns-server = 223.5.5.5, 119.29.29.29
-
-[Proxy]
-${lines.join('\n')}
-
-[Proxy Group]
-🚀 节点选择 = select, ${lines.map(l => l.split(' = ')[0]).join(', ')}
-🌐 全球直连 = select, DIRECT
-🐟 漏网之鱼 = select, 🚀 节点选择
-
-[Rule]
-GEOIP,CN,DIRECT
-FINAL,🐟 漏网之鱼
-`;
-}
-
-// ---------- Sing-box JSON ----------
-function generateSingbox(cfg, nodes) {
-  const host = cfg.host;
-  const path = proxyPath(cfg);
-  const outbounds = nodes.map((n, i) => {
-    const { user, srv, prt, name, isTrojan, tls } = parseShareNode(n, i);
-    const type = getParam(n, 'type') || 'ws';
-    // XHTTP 在 sing-box 中不支持 uTLS（官方限制，xhttp+utls 会导致 outbound 异常/流量不通），xhttp 模式禁用 utls
-    // 使用部署域名 server_name 验证证书；
-    // 强制 HTTP/1.1 ALPN 避免 CF 边缘协商 h2 导致 WS 升级失败（v1.0.5 修复）
-    // xhttp stream-one 依赖 HTTP/2 双向流，ALPN 必须 h2（h1.1 经 CF 边缘请求体未发完响应无法回传 → 超时）；ws 才用 http/1.1
-    const tlsObj = tls ? (type === 'xhttp'
-      ? { enabled: true, server_name: host, insecure: false, alpn: ['h2'] }
-      : { enabled: true, server_name: host, insecure: false, alpn: ['http/1.1'], utls: { enabled: true, fingerprint: 'chrome' } })
-      : { enabled: false };
-    // early data：TLS 下的 ws 走 2048 字节 early data（ed=2048），
-    // 减少首包往返；明文 ws 与 xhttp 不启用
-    const transport = type === 'xhttp' ? { type: 'xhttp', mode: 'stream-one', path } :
-      (tls ? {
-        type: 'ws', path, headers: { Host: host },
-        max_early_data: 2048, early_data_header_name: 'Sec-WebSocket-Protocol'
-      } : { type: 'ws', path, headers: { Host: host } });
-    if (isTrojan) {
-      return {
-        type: 'trojan', tag: name, server: srv, server_port: prt,
-        password: user, tls: tlsObj,
-        transport
-      };
-    }
-    return {
-      type: 'vless', tag: name, server: srv, server_port: prt,
-      uuid: user, packet_encoding: 'xudp',
-      tls: tlsObj,
-      transport
-    };
-  });
-  const tags = outbounds.map(o => o.tag);
-  // rule_set 分流（参考 CFNext sing-box 生成）：远程规则集（MetaCubeX .list 文本格式）+ 主流分流域名
-  const RULE_SETS = [
-    ['geosite-cn', '🎯 全球直连'], ['geosite-google', '🌐 谷歌服务'], ['geosite-apple', '🍎 苹果服务'],
-    ['geosite-microsoft', 'Ⓜ️ 微软服务'], ['geosite-openai', '🤖 OpenAI'], ['geosite-spotify', '🌍 国外媒体'],
-    ['geosite-youtube', '🌍 国外媒体'], ['geosite-netflix', '🌍 国外媒体'], ['geosite-disney', '🌍 国外媒体'],
-    ['geosite-twitter', '🌍 国外媒体'], ['geosite-telegram', '🌍 国外媒体'], ['geosite-github', '🌍 国外媒体'],
-    ['geosite-category-ads-all', 'block']
-  ];
-  const config = {
-    log: { level: 'info' },
-    // 完整 DNS + fakeip：远程 DoH 解析（走代理）+ 本地直连 DNS 兜底；fakeip 加速分流
-    dns: {
-      servers: [
-        { tag: 'dns-remote', address: 'https://1.1.1.1/dns-query' },
-        { tag: 'dns-direct', address: 'udp://223.5.5.5' }
-      ],
-      strategy: 'ipv4_only',
-      independent_cache: true,
-      fakeip: { enabled: true, inet4_range: '198.18.0.0/15', store_fakeip: true }
-    },
-    inbounds: [
-      {
-        type: 'mixed', tag: 'mixed-in', listen: '127.0.0.1', listen_port: 2080,
-        sniff: true, sniff_override_destination: true
-      },
-      {
-        type: 'tun', tag: 'tun-in', interface_name: 'tun0',
-        inet4_address: ['172.19.0.1/30'], mtu: 9000,
-        auto_route: true, strict_route: true, stack: 'mixed',
-        sniff: true, sniff_override_destination: true
-      }
-    ],
-    outbounds: [
-      ...outbounds,
-      { type: 'direct', tag: 'direct' },
-      { type: 'block', tag: 'block' },
-      { type: 'dns', tag: 'dns-out' },
-      { type: 'selector', tag: '🚀 节点选择', outbounds: tags },
-      { type: 'selector', tag: '🎯 全球直连', outbounds: ['direct'] },
-      { type: 'selector', tag: '🐟 漏网之鱼', outbounds: ['🚀 节点选择', '🎯 全球直连'] },
-      { type: 'selector', tag: '🌍 国外媒体', outbounds: ['🚀 节点选择'] },
-      { type: 'selector', tag: '🌐 谷歌服务', outbounds: ['🚀 节点选择'] },
-      { type: 'selector', tag: '🤖 OpenAI', outbounds: ['🚀 节点选择'] },
-      { type: 'selector', tag: '🍎 苹果服务', outbounds: ['🎯 全球直连'] },
-      { type: 'selector', tag: 'Ⓜ️ 微软服务', outbounds: ['🎯 全球直连'] }
-    ],
-    route: {
-      rules: [
-        { protocol: 'dns', outbound: 'dns-out' },
-        { ip_is_private: true, outbound: 'direct' },
-        ...RULE_SETS.map(([rs, out]) => ({ rule_set: [rs], outbound: out })),
-        { geoip: ['cn'], outbound: 'direct' },   // 大陆 IP 兜底直连（覆盖未收录域名 / 纯 IP 连接的大陆应用）
-        { ip_is_private: true, outbound: 'block' }
-      ],
-      rule_set: RULE_SETS.map(([rs]) => ({
-        type: 'remote', tag: rs, format: 'source',
-        url: 'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/' + rs + '.list'
-      })),
-      final: '🐟 漏网之鱼',
-      auto_detect_interface: true,
-      default_domain_resolver: { server: 'dns-remote' }
-    },
-    experimental: {
-      clash_api: { external_controller: '127.0.0.1:9090' }
-    }
-  };
-  return JSON.stringify(config, null, 2);
-}
-
-// ---------- Surge ----------
-function generateSurge(cfg, nodes) {
-  const host = cfg.host, path = proxyPath(cfg);
-  const proxies = nodes.map((n, i) => {
-    const { user, srv, prt, name, isTrojan, tls } = parseShareNode(n, i);
-    const tlsPart = tls ? ', tls=true, skip-cert-verify=false, sni=' + host : ', tls=false';
-    return isTrojan
-      ? `${name} = trojan, ${srv}, ${prt}, password=${user}, ws=true, ws-path=${path}, ws-headers=Host:${host}${tlsPart}`
-      : `${name} = vless, ${srv}, ${prt}, username=${user}, ws=true, ws-path=${path}, ws-headers=Host:${host}${tlsPart}`;
-  });
-  return `#!MANAGED-CONFIG
-[General]
-loglevel = notify
-dns-server = 223.5.5.5, 119.29.29.29
-
-[Proxy]
-${proxies.join('\n')}
-
-[Proxy Group]
-🚀 节点选择 = select, ${proxies.map(p => p.split(' = ')[0]).join(', ')}
-🌐 全球直连 = select, DIRECT
-🐟 漏网之鱼 = select, 🚀 节点选择
-
-[Rule]
-GEOIP,CN,DIRECT
-FINAL,🐟 漏网之鱼
-`;
-}
-
-// ---------- Loon ----------
-function generateLoon(cfg, nodes) {
-  const host = cfg.host, path = proxyPath(cfg);
-  const proxies = nodes.map((n, i) => {
-    const { user, srv, prt, name, isTrojan, tls } = parseShareNode(n, i);
-    const tlsPart = tls ? ', tls=true, skip-cert-verify=false, sni=' + host : ', tls=false';
-    return isTrojan
-      ? `${name} = trojan, ${srv}, ${prt}, password=${user}, ws=true, ws-path=${path}, ws-headers=Host:${host}${tlsPart}`
-      : `${name} = vless, ${srv}, ${prt}, username=${user}, ws=true, ws-path=${path}, ws-headers=Host:${host}${tlsPart}`;
-  });
-  const names = proxies.map(p => p.split(' = ')[0]).join(', ');
-  return `[General]
-dns-server = 223.5.5.5, 119.29.29.29
-
-[Proxy]
-${proxies.join('\n')}
-
-[Proxy Group]
-🚀 节点选择 = select, ${names}
-🌐 全球直连 = select, DIRECT
-🐟 漏网之鱼 = select, ${names}
-
-[Rule]
-GEOIP,CN,DIRECT
-FINAL,🐟 漏网之鱼
-`;
-}
-
-// ---------- Quantumult X ----------
-function generateQuanX(cfg, nodes) {
-  const host = cfg.host, path = proxyPath(cfg);
-  // QuanX 的 ip:port 格式中 IPv6 必须带方括号（裸 v6 与端口冒号歧义）
-  const qxHost = (srv) => srv.indexOf(':') >= 0 ? '[' + srv + ']' : srv;
-  const servers = nodes.map((n, i) => {
-    const { user, srv, prt, name } = parseShareNode(n, i);
-    if (n.startsWith('trojan://')) {
-      return `trojan=${qxHost(srv)}:${prt}, password=${user}, over-tls=true, tls-host=${host}, obfs=wss, obfs-host=${host}, obfs-uri=${path}, tls-verification=true, tag=${name}`;
-    }
-    const tls = (getParam(n, 'security') || 'tls') === 'tls';
-    return `vless=${qxHost(srv)}:${prt}, method=none, password=${user}, obfs=${tls ? 'wss' : 'ws'}, obfs-host=${host}, obfs-uri=${path}${tls ? ', tls-verification=true, tls13=true' : ''}, tag=${name}`;
-  });
-  const names = nodes.map((n, i) => {
-    const h = n.indexOf('#');
-    if (h < 0) return `节点${i + 1}`;
-    try { return decodeURIComponent(n.slice(h + 1)) || `节点${i + 1}`; } catch (e) { return `节点${i + 1}`; }
-  }).join(', ');
-  return `[general]
-network_check_url=http://www.gstatic.com/generate_204
-server_check_url=http://www.gstatic.com/generate_204
-dns_exclusion_list=*.cmpassport.com, *.qq.com, *.weibo.com, *.icloud.com
-[dns]
-server=223.5.5.5
-server=119.29.29.29
-[server_local]
-${servers.join('\n')}
-[policy]
-static=🚀 节点选择, ${names}, img-url=https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Proxy.png
-static=🌐 全球直连, direct, img-url=https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Direct.png
-static=🐟 漏网之鱼, 🚀 节点选择, direct, img-url=https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Final.png
-[filter_local]
-geoip, cn, 🌐 全球直连
-final, 🐟 漏网之鱼
-`;
 }
 
 // ★ 测活总开关（见 DEFAULT_CONFIG.probeAlive / 面板「节点测活」）：关闭时所有测活函数直接返回 true（不剔除任何节点）
@@ -3775,8 +3058,6 @@ function appendStableNodes(nodes, rc, cap) {
     const nm = '内置·保底-' + String(si).padStart(2, '0');
     if (rc.enableVless) nodes.push(vlessNode(rc, ip, 443, nm));
     if (nodes.length >= cap) break;
-    if (rc.enableTrojan) nodes.push(trojanNode(rc, ip, 443, nm));
-    if (nodes.length >= cap) break;
     if (rc.enableXhttp) nodes.push(vlessNode(rc, ip, 443, nm, { type: 'xhttp' }));
   }
 }
@@ -3787,7 +3068,7 @@ function appendStableNodes(nodes, rc, cap) {
 // 与「地址来源」面板控制保持一致；
 // 内置地区反代（proxyip.*.cmliussss.net）不再自动下发为订阅节点
 // （需要反代时请通过「出站代理」或「反代/落地 IP」填写自己的中继服务）
-function appendFallbackNodes(nodes, rc, cap, colo) {
+function appendFallbackNodes(nodes, rc, cap) {
   if (nodes.length >= cap) return;
   const used = new Set();
   for (const n of nodes) {
@@ -3798,7 +3079,6 @@ function appendFallbackNodes(nodes, rc, cap, colo) {
     if (used.has(server)) return;
     used.add(server);
     if (rc.enableVless) nodes.push(vlessNode(rc, server, 443, name));
-    if (rc.enableTrojan) nodes.push(trojanNode(rc, server, 443, name));
     if (rc.enableXhttp) nodes.push(vlessNode(rc, server, 443, name, { type: 'xhttp' }));
   };
   // 原生地址：仅面板「原生地址」开关（src.native）开启时下发；默认关闭不下发
@@ -3808,8 +3088,9 @@ function appendFallbackNodes(nodes, rc, cap, colo) {
   // 内置地区反代（proxyip.*.cmliussss.net）不再自动下发（用户要求订阅中不出现内置反代节点）
 }
 
-// 根据 UA 或指定格式生成订阅
-async function generateSubscription(cfg, requestUrl, format, ua, colo, env) {
+// 订阅仅输出 UTF-8 明文 VLESS URI，每行一个节点。
+async function generateSubscription(cfg, requestUrl) {
+  if (!cfg.enableVless && !cfg.enableXhttp) throw new AppError(400, '请先启用 VLESS WebSocket 或 VLESS XHTTP，再获取订阅');
   // 筛选含 IPv6 时刷新官方 v6 网段（ips-v6，6 小时缓存节流；失败沿用内置/上次成功段）
   const _ipT0 = (cfg.filter && cfg.filter.ipType) || [];
   if (_ipT0.includes('IPv6')) await refreshOfficialV6CIDRs(cfg._io);
@@ -3969,15 +3250,8 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo, env) {
   }
   // 仅勾选 IPv6 时：resolved（地区筛选解析）在首次过滤之后才并入，此处二次过滤保证纯 v6（数量控制下不被 v4 挤占）
   if (onlyV6 && rc.preferredIPs) rc.preferredIPs = rc.preferredIPs.filter(x => String(x.ip).indexOf(':') >= 0);
-  ua = (ua || '').toLowerCase();
-  const forced = (format || '').toLowerCase();
-  // 节点数上限（按 Workers / Pages 免费额度 10ms CPU 硬限调整）：
-  //   - 纯行格式（v2ray 通用链接）拼接近乎零成本 → 800 上限，满足大量择优；
-  //   - 结构化格式（Clash/Singbox/Surge/Loon/QuanX）模板生成成本较高，
-  //     为保免费版稳定（含网络/KV/解析开销）收紧到 300，避免 CPU 超限导致订阅 5xx；
-  //   - 自定义订阅开启「追加内置及默认节点」时：轻量格式放宽到 800，结构化格式放宽到 300。
-  const isHeavy = ['clash', 'singbox', 'sing-box', 'surge', 'surfboard', 'loon', 'quanx', 'quantumultx'].includes(forced) || /clash|singbox|sing-box|surge|surfboard|loon|quantumult/.test(ua);
-  let cap = isHeavy ? 300 : 800;
+  // 明文订阅统一硬上限，不按客户端或 User-Agent 区分。
+  let cap = 800;
   if(cfg.nodeLimit)cap=Math.min(cap,cfg.nodeLimitCount || 300);
   // 配额安全自动调节：当日用量偏高时由路由层注入 _quotaCap，此处做最终收紧（永远不放大）
   if (cfg._quotaCap) cap = Math.min(cap, cfg._quotaCap);
@@ -3993,7 +3267,7 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo, env) {
   // 兜底入口节点：自定义订阅严格模式（仅下发框内节点）不追加，其余模式追加原生地址与地区反代入口；
   // 仅勾选 IPv6 时跳过（原生地址/反代均为 IPv4 域名，混入会破坏「只下发 IPv6」语义）
   const strictCustom = (mode === 'custom' && !(cfg.optimizer && cfg.optimizer.subIncludeDefault));
-  if (!strictCustom && !onlyV6) appendFallbackNodes(nodes, rc, cap, colo);
+  if (!strictCustom && !onlyV6) appendFallbackNodes(nodes, rc, cap);
   // 内置保底节点：无论任何模式（含自定义订阅严格模式）始终追加 20 个实测可用的 CF 官方任播段 IP（443），
   // 保证订阅内始终有稳定可用节点（参考 TunnelBoard 内置优选思路）；仅勾选 IPv6 时跳过（保底池为 IPv4）
   // 内置保底节点：严格自定义模式（仅自定义节点）且已有自定义节点时跳过——用户自担可用性，不混入「内置·保底-X」；
@@ -4016,7 +3290,6 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo, env) {
       if (seen.has(ip)) return;
       seen.add(ip);
       if (rc.enableVless) nodes.push(vlessNode(rc, ip, port || 443, name));
-      if (rc.enableTrojan && nodes.length < cap) nodes.push(trojanNode(rc, ip, port || 443, name));
       if (rc.enableXhttp && nodes.length < cap) nodes.push(vlessNode(rc, ip, port || 443, name, {type:'xhttp'}));
     };
     let fi = 0;
@@ -4040,7 +3313,7 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo, env) {
       }
     }
   }
-  // 严格封顶：多协议膨胀可能越过 cap 一个 IP（3 条），统一截断到上限；节点数量控制开启时同样按设定值精确截断
+  // 严格封顶：同一地址的 WS/XHTTP 节点统一计入数量上限。
   if (nodes.length > cap) nodes.length = cap;
   // 节点命名：按来源国家码/机房码追加地点后缀；只有国家码时不显示城市。
   // 放在所有追加/截断之后，避免影响 filterNodes 的地区标记判定（它跑在改名之前）。
@@ -4060,29 +3333,7 @@ async function generateSubscription(cfg, requestUrl, format, ua, colo, env) {
     }
   }
   nodes=nodes.slice(0,cap);
-  let type, body;
-  if (forced === 'clash') { type = 'text/yaml'; body = generateClash(rc, nodes); }
-  else if (forced === 'singbox' || forced === 'sing-box') { type = 'application/json'; body = generateSingbox(rc, nodes); }
-  else if (forced === 'surge') { type = 'text/plain'; body = generateSurge(rc, nodes); }
-  else if (forced === 'surfboard') { type = 'text/plain'; body = generateSurfboard(rc, nodes); }
-  else if (forced === 'loon') { type = 'text/plain'; body = generateLoon(rc, nodes); }
-  else if (forced === 'quanx' || forced === 'quantumultx') { type = 'text/plain'; body = generateQuanX(rc, nodes); }
-  else if (forced === 'plain' || forced === 'raw') { type = 'text/plain'; body = nodes.join('\n'); }
-  else if (forced === 'v2ray' || forced === 'v2rayn' || forced === 'shadowrocket' || forced === 'nekoray' || forced === 'stash') {
-    // 明文下发（与 1.0.6 一致）：base64 订阅在 AsteriskNG / v2rayNG 中按系统编码（GBK）解码，
-    // 中文节点名（UTF-8）会被误读成乱码（如 美国 → 缇庡浗）；明文按响应 charset=utf-8 读取则正常
-    type = 'text/plain'; body = nodes.join('\n');
-  }
-  // UA 自动识别
-  else if (ua.includes('clash') || ua.includes('stash')) { type = 'text/yaml'; body = generateClash(rc, nodes); }
-  else if (ua.includes('sing-box')) { type = 'application/json'; body = generateSingbox(rc, nodes); }
-  else if (ua.includes('surge')) { type = 'text/plain'; body = generateSurge(rc, nodes); }
-  else if (ua.includes('surfboard')) { type = 'text/plain'; body = generateSurfboard(rc, nodes); }
-  else if (ua.includes('loon')) { type = 'text/plain'; body = generateLoon(rc, nodes); }
-  else if (ua.includes('quantumult')) { type = 'text/plain'; body = generateQuanX(rc, nodes); }
-  // 默认（v2rayN / Shadowrocket / 未知客户端）：返回 base64 编码订阅（V2rayN 标准格式）
-  else { type = 'text/plain'; body = nodes.join('\n'); }   // 明文（同 1.0.6，避免客户端按 GBK 解码 base64 导致中文名称乱码）
-  return { type, body };
+  return { type: 'text/plain', body: nodes.join('\n'), nodeCount: nodes.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -4369,29 +3620,14 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
       <div class="card">
         <h3><span class="tick"></span>快速开始</h3>
         <ol class="steps">
-          <li><b>部署即用</b>：绑定域名后客户端订阅即可获得海量节点（内置 300 条优选 IP 与地区域名源），默认已配好大陆直连分流（大陆应用、微软、苹果直连，国外服务走代理）。</li>
+          <li><b>部署即用</b>：绑定域名后客户端订阅即可获得海量节点（内置 300 条优选 IP 与地区域名源），订阅仅包含明文 VLESS 节点，分流规则请在客户端配置。</li>
           <li><b>调优节点</b>：在「优选配置」在线测速，把最优 IP 加入优选列表（自定义订阅模式内置常用订阅源，可自行增删，可追加内置优选池与默认节点）。</li>
           <li><b>保障额度</b>：在「配额安全」开启用量监控与自动调节，辅助观察免费额度用量（需在面板设置中配置 Cloudflare 账户 ID 与 API 令牌）。</li>
         </ol>
       </div>
       <div class="card">
         <h3><span class="tick"></span>订阅地址</h3>
-        <div class="row" style="margin-bottom:12px">
-          <div class="field grow" style="margin:0"><label>订阅格式</label>
-            <select id="subFmt">
-              <option value="auto">自动识别</option>
-              <option value="clash">Clash / Mihomo</option>
-              <option value="singbox">Sing-box</option>
-              <option value="surge">Surge</option>
-              <option value="surfboard">Surfboard</option>
-              <option value="loon">Loon</option>
-              <option value="quanx">Quantumult X</option>
-              <option value="v2ray">v2rayN / Shadowrocket</option>
-              <option value="stash">Stash</option>
-              <option value="plain">明文 vless</option>
-            </select>
-          </div>
-        </div>
+        <p class="hint" style="margin-bottom:12px">明文 VLESS 订阅，每行一个 vless:// 节点；包含已启用的 WebSocket / XHTTP 传输，分流规则由客户端自行配置。</p>
         <div class="field"><label>订阅链接</label>
           <div class="inrow">
             <input type="text" id="subUrl" readonly onclick="this.select()">
@@ -4479,8 +3715,8 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
         <div class="card">
           <h3><span class="tick"></span>协议开关</h3>
           <div class="proto-row"><label class="switch"><input type="checkbox" id="en-vless" checked><span class="sl"></span></label><span>VLESS 协议（默认开启）</span></div>
-          <div class="proto-row"><label class="switch"><input type="checkbox" id="en-trojan"><span class="sl"></span></label><span>Trojan 协议（支持Mihomo内核）</span></div>
-          <div class="proto-row"><label class="switch"><input type="checkbox" id="en-xhttp"><span class="sl"></span></label><span>XHTTP 协议（支持Mihomo内核，须绑定自定义域名并开启gRPC）</span></div>
+          <div class="proto-row"><label class="switch"><input type="checkbox" id="en-trojan"><span class="sl"></span></label><span>Trojan 连接兼容（不加入订阅）</span></div>
+          <div class="proto-row"><label class="switch"><input type="checkbox" id="en-xhttp"><span class="sl"></span></label><span>VLESS XHTTP（订阅中输出 type=xhttp）</span></div>
           <div class="field" style="margin-top:12px"><label>Trojan 密码（留空使用 UUID）</label><input type="text" id="tp-pass" placeholder="Trojan 密码" autocomplete="off" oninput="onSecretInput('tp-pass')"><input type="hidden" id="tp-pass-clear" value=""><button type="button" class="btn sm" id="tp-pass-clear-btn" onclick="clearSecret('tp-pass')" style="margin-top:8px">清除已保存密码（保存后生效）</button></div>
         </div>
         <div class="card">
@@ -4637,7 +3873,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
           <h3><span class="tick"></span>下发控制</h3>
           <div class="proto-row"><label class="switch"><input type="checkbox" id="q-nl-on"><span class="sl"></span></label><span>精确节点数量控制</span></div>
           <div class="field" style="margin-top:10px"><label>节点上限（1-800）</label><input type="number" id="q-nl-count" min="1" max="800" value="300"></div>
-          <p class="hint">默认 300 条；结构化格式最多 300 条，明文最多 800 条，与自定义上限取较小值。上限约束所有协议总数，实际数量取决于可用来源。</p>
+          <p class="hint">默认 300 条，明文 VLESS 订阅最多 800 条，与自定义上限取较小值。WebSocket / XHTTP 节点共同计数，实际数量取决于可用来源。</p>
         </div>
         <div class="card">
           <h3><span class="tick"></span>轮询换新</h3>
@@ -4650,7 +3886,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
         <div class="grid3">
           <div class="field" style="margin:0"><div class="kv"><span class="k">节点数量控制</span><span class="v" id="qNl">—</span></div><div class="kv"><span class="k">精确节点上限</span><span class="v" id="qNlCount">—</span></div></div>
           <div class="field" style="margin:0"><div class="kv"><span class="k">节点测活</span><span class="v" id="qProbe">—</span></div><div class="kv"><span class="k">轮询换新机制</span><span class="v" id="qPoll">—</span></div></div>
-          <div class="field" style="margin:0"><div class="kv"><span class="k">行式格式上限</span><span class="v">800 节点</span></div><div class="kv"><span class="k">结构化格式上限</span><span class="v">300 节点</span></div></div>
+          <div class="field" style="margin:0"><div class="kv"><span class="k">明文 VLESS 上限</span><span class="v">800 节点</span></div><div class="kv"><span class="k">订阅内容</span><span class="v">VLESS URI 列表</span></div></div>
         </div>
         <p class="hint" style="margin-top:10px">每次订阅请求都会消耗 Worker 的 CPU 时间（免费计划 10ms/请求）。节点上限仅降低开销，实际 CPU 时间仍需在部署后的 Metrics 中验证。</p>
       </div>
@@ -4728,12 +3964,6 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
             <tr><td>6Kmfi6HP/EDtunnel</td><td><a href="https://github.com/6Kmfi6HP/EDtunnel" target="_blank" rel="noopener">github.com/6Kmfi6HP/EDtunnel</a></td></tr>
             <tr><td>IonRh/Cloudflare-BestIP</td><td><a href="https://github.com/IonRh/Cloudflare-BestIP" target="_blank" rel="noopener">github.com/IonRh/Cloudflare-BestIP</a></td></tr>
             <tr><td>zvos/CF-Workers-Monitor</td><td><a href="https://github.com/zvos/CF-Workers-Monitor" target="_blank" rel="noopener">github.com/zvos/CF-Workers-Monitor</a></td></tr>
-            <tr><td>MetaCubeX/meta-rules-dat</td><td><a href="https://github.com/MetaCubeX/meta-rules-dat" target="_blank" rel="noopener">github.com/MetaCubeX/meta-rules-dat</a></td></tr>
-            <tr><td>666OS/rules</td><td><a href="https://github.com/666OS/rules" target="_blank" rel="noopener">github.com/666OS/rules</a></td></tr>
-            <tr><td>DustinWin/ruleset_geodata</td><td><a href="https://github.com/DustinWin/ruleset_geodata" target="_blank" rel="noopener">github.com/DustinWin/ruleset_geodata</a></td></tr>
-            <tr><td>blackmatrix7/ios_rule_script</td><td><a href="https://github.com/blackmatrix7/ios_rule_script" target="_blank" rel="noopener">github.com/blackmatrix7/ios_rule_script</a></td></tr>
-            <tr><td>TG-Twilight/AWAvenue-Ads-Rule</td><td><a href="https://github.com/TG-Twilight/AWAvenue-Ads-Rule" target="_blank" rel="noopener">github.com/TG-Twilight/AWAvenue-Ads-Rule</a></td></tr>
-            <tr><td>Koolson/Qure</td><td><a href="https://github.com/Koolson/Qure" target="_blank" rel="noopener">github.com/Koolson/Qure</a></td></tr>
           </tbody>
         </table></div>
       </div>
@@ -4749,7 +3979,6 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
             <tr><td>DoH 解析</td><td class="mono">cloudflare-dns.com / dns.alidns.com / doh.pub</td></tr>
             <tr><td>Cloudflare 用量监控（GraphQL）</td><td class="mono">api.cloudflare.com/client/v4/graphql</td></tr>
             <tr><td>版本更新检测</td><td class="mono">raw.githubusercontent.com/PAICNI/CFNext/...</td></tr>
-            <tr><td>远程规则集（sing-box / Clash）</td><td class="mono">raw.githubusercontent.com/MetaCubeX/meta-rules-dat/...</td></tr>
             <tr><td>面板二维码库</td><td class="mono">cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js</td></tr>
           </tbody>
         </table></div>
@@ -4953,7 +4182,7 @@ function loadAll(){
       CFG = r.data;
       fillForm();
       renderAll();
-      makeSub(false);
+      makeSub();
       setConn(true);
       refreshQuota();
       toast('配置已加载', 'ok');
@@ -5282,7 +4511,7 @@ function saveAll(){
         CFG = r.data;
         fillForm();
         renderAll();
-        makeSub(false);
+        makeSub();
         refreshQuota();
         btn.classList.remove('dirty');
         $('savedAt').textContent = '已保存：' + new Date().toLocaleTimeString();
@@ -5355,86 +4584,54 @@ document.querySelectorAll('input,select,textarea').forEach(function(el){
 });
 
 /* ===== 订阅 ===== */
-function subUrlOf(fmt){
-  // 自定义订阅路径优先：自动保留当前域名（location.origin），只替换路径段；
-  // 用户只填 UUID/别名段（如 AAZ），拼成 https://当前域名/AAZ/sub；留空用面板路径。
-  // 填了 /sub 结尾或带前后斜杠时自动归一，格式后缀（clash/singbox 等）拼为 /sub/<格式>
-  var custom = (window.CFG && CFG.subUrl) ? String(CFG.subUrl).trim().replace(/^\/+/, '').replace(/\/sub$/, '').replace(/\/+$/, '') : '';
-  var base = custom ? (location.origin + '/' + custom) : (location.origin + APIPATH);
-  var u = location.origin + '/s/' + encodeURIComponent(CFG.subToken) + '/sub';
-  if(custom)u=base+'/sub';
-  if(fmt)u+='/'+fmt;
-  return custom ? u+'?token='+encodeURIComponent(CFG.subToken) : u;
+function subUrlOf(){
+  var custom = CFG.subUrl || '';
+  if (custom) return location.origin + '/' + custom + '/sub?token=' + encodeURIComponent(CFG.subToken);
+  return location.origin + '/s/' + encodeURIComponent(CFG.subToken) + '/sub';
 }
-function makeSub(showQR){
-  var fmt = $('subFmt').value;
-  var url = subUrlOf(fmt === 'auto' ? '' : fmt);
+function makeSub(){
+  if (!CFG) return '';
+  var url = subUrlOf();
   $('subUrl').value = url;
-  if (showQR) showQRCode(url);
+  if ($('qrWrap').style.display === 'block') showQRCode(url);
+  return url;
 }
-$('subFmt').addEventListener('change', function(){ makeSub(false); });
 function toggleQR(){
   var w = $('qrWrap');
   if (w.style.display === 'block'){ w.style.display = 'none'; return; }
-  showQRCode($('subUrl').value || subUrlOf(''));
+  showQRCode($('subUrl').value || subUrlOf());
 }
 function showQRCode(url){
   var w = $('qrWrap');
   w.style.display = 'block';
   if (typeof qrcode === 'undefined'){ w.innerHTML = '<div class="hint">二维码库加载失败，请直接复制链接</div>'; return; }
   try {
-    var fmt = ($('subFmt') && $('subFmt').value) || 'auto';
     var q = qrcode(0, 'M');
-    q.addData(qrPayloadOf(fmt, url));
+    q.addData(url);
     q.make();
     w.innerHTML = '<div class="qrbox">' + q.createImgTag(4, 10) + '</div>';
   } catch(e) { w.innerHTML = '<div class="hint">二维码生成失败：' + e.message + '</div>'; }
 }
-// 二维码内容随订阅格式（客户端）联动：
-// Clash/Mihomo、Stash → clash://install-config（FlyClash / Clash Verge / Stash 扫码装订阅，配置名取订阅响应头 filename=CFNext）
-// Sing-box → sing-box://import-remote-profile?url=...#CFNext（官方 scheme，# 后为配置文件名称）
-// Surge → surge:///install-config（Surge 官方 scheme）
-// auto / v2rayN+Shadowrocket / Loon / Quantumult X / 明文 → 直接使用订阅链接（Shadowrocket / Loon / QuanX 扫码识别）
-function qrPayloadOf(fmt, url){
-  var enc = encodeURIComponent(url);
-  if (fmt === 'clash' || fmt === 'stash') return 'clash://install-config?url=' + enc;
-  if (fmt === 'singbox') return 'sing-box://import-remote-profile?url=' + enc + '#CFNext';
-  if (fmt === 'surge') return 'surge:///install-config?url=' + enc;
-  return url;
-}
 function downloadSub(){
-  var fmt = $('subFmt').value;
   var a = document.createElement('a');
-  a.href = subUrlOf(fmt === 'auto' ? '' : fmt);
+  a.href = subUrlOf();
   a.download = 'cfnext-sub.txt';
   document.body.appendChild(a);
   a.click();
   a.remove();
 }
 function previewSub(){
-  var fmt = $('subFmt').value;
   var box = $('subPrev');
   box.style.display = 'block';
   $('prevType').textContent = '请求中…';
   $('prevCount').textContent = '—';
   $('prevBody').textContent = '';
-  api('sub?fmt=' + encodeURIComponent(fmt === 'auto' ? '' : fmt))
+  api('sub')
     .then(function(r){
       if (!r || !r.ok){ $('prevType').textContent = '预览失败'; $('prevBody').textContent = (r && r.msg) || '未知错误'; return; }
       var body = r.body || '';
-      var type = r.type || '';
-      $('prevType').textContent = type || '—';
-      var n = 0;
-      if (/clash|yaml/i.test(type)) n = (body.match(/- name:/g) || []).length;
-      else if (/json/i.test(type)) n = (body.match(/"tag"/g) || []).length;
-      else {
-        var t = body;
-        if (!/^(vless|trojan|ss|xhttp):\/\//m.test(t)) {
-          try { t = atob(t); } catch (e) { /* 保持原样 */ }
-        }
-        n = t.split('\n').filter(function(l){ return /^(vless|trojan|ss|xhttp):\/\//.test(l.trim()); }).length;
-      }
-      $('prevCount').textContent = n + ' 个节点';
+      $('prevType').textContent = '明文 VLESS';
+      $('prevCount').textContent = r.nodeCount + ' 个节点';
       $('prevBody').textContent = body.length > 2600 ? body.slice(0, 2600) + '\n…（已截断，完整内容请下载）' : body;
     })
     .catch(function(){ $('prevType').textContent = '预览失败：无法连接服务器'; $('prevBody').textContent = ''; });
@@ -5721,11 +4918,6 @@ button:disabled{opacity:.6;cursor:not-allowed}
 // ---------------------------------------------------------------------------
 // 路由与调度
 // ---------------------------------------------------------------------------
-function isBrowserUA(ua) {
-  // 任何包含 Mozilla 的 UA 视为浏览器；curl / ClashForAndroid / Sing-box 等客户端不含
-  return (ua || '').toLowerCase().includes('mozilla');
-}
-
 async function requireAuth(request,cfg){
   if(!cfg.admin || !cfg._sessionKey)return false;
   const m=(request.headers.get('Cookie')||'').match(/(?:^|;\s*)luma_auth=([^;]+)/);
@@ -5741,7 +4933,6 @@ function sameOrigin(request){const origin=request.headers.get('Origin');return !
 function safeNext(value,cfg){return value==='/' + cfg.path ? value : '/' + cfg.path;}
 async function handleRequest(request,env){
   const url=new URL(request.url), path=url.pathname.replace(/^\/+|\/+$/g,''),segs=path.split('/');
-  const UA=request.headers.get('User-Agent')||'';
   if(url.protocol==='http:')return Response.redirect(url.href.replace('http:','https:'),301);
   if(path==='version'&&request.method==='GET')return json({version:VERSION});
   if(path==='favicon.ico')return new Response(null,{status:204});
@@ -5776,15 +4967,14 @@ async function handleRequest(request,env){
     if(!cfg.enableXhttp)throw new AppError(403,'XHTTP 已关闭');
     return handleXhttpProxy(request,cfg);
   }
-  const tokenRoute=segs[0]==='s'&&segs[2]==='sub'&&segs.length<=4;
-  const aliasRoute=cfg.subUrl&&segs[0]===cfg.subUrl&&segs[1]==='sub'&&segs.length<=3;
-  const panelSub=isManagement&&segs[1]==='sub'&&segs.length<=3;
+  const tokenRoute=segs[0]==='s'&&segs[2]==='sub'&&segs.length===3;
+  const aliasRoute=cfg.subUrl&&segs[0]===cfg.subUrl&&segs[1]==='sub'&&segs.length===2;
+  const panelSub=isManagement&&segs[1]==='sub'&&segs.length===2;
   if(tokenRoute||aliasRoute||panelSub){
     if(request.method!=='GET')throw new AppError(405,'订阅仅支持 GET');
     const token=tokenRoute?segs[1]:url.searchParams.get('token')||'';
     if(!constantEqual(token,cfg.subToken)&&!(panelSub&&await authenticated()))throw new AppError(403,'订阅令牌无效');
-    const format=tokenRoute?segs[3]||'':segs[2]||url.searchParams.get('format')||'';
-    return subscriptionResponse(cfg,request,format,env);
+    return subscriptionResponse(cfg,request);
   }
   if(isManagement&&segs.length===1&&request.method==='GET'){
     if(!cfg.admin)throw new AppError(503,'管理面板未启用，请设置 ADMIN Secret');
@@ -5831,8 +5021,8 @@ async function handleRequest(request,env){
   if(api==='update')return json({ok:true,data:await checkUpdate(env)});
   if(api==='quota')return json({ok:true,data:await getQuota(env,cfg)});
   if(api==='sub'){
-    const sub=await generateSubscription(cfg,request.url,url.searchParams.get('fmt')||'',UA,request.cf?.colo,env);
-    return json({ok:true,type:sub.type,body:sub.body});
+    const sub=await subscriptionForRequest(cfg,request);
+    return json({ok:true,...sub});
   }
   if(api==='candidates'){
     if(request.method!=='POST')throw new AppError(405,'仅支持 POST');
@@ -5848,15 +5038,19 @@ async function handleRequest(request,env){
   }
   throw new AppError(404,'未知接口');
 }
-async function subscriptionResponse(cfg,request,format,env){
+async function subscriptionForRequest(cfg,request){
+  cfg={...cfg};
   if(cfg.polling)cfg._rotationSeed=cfg.configVersion+'|'+Math.floor(Date.now()/900000)+'|'+(request.headers.get('User-Agent')||'');
   // Quota is advisory. Only a recent snapshot can reduce output; never block a subscription on Analytics.
   if(cfg.quotaAuto&&QUOTA_CACHE&&Date.now()-QUOTA_CACHE.at<QUOTA_TTL&&QUOTA_CACHE.accountId===cfg.cfAccountId && QUOTA_CACHE.data?.updatedAt?.slice(0,10)===new Date().toISOString().slice(0,10)){
     const q=QUOTA_CACHE.data;
     if(q?.today&&q.percent>=60)cfg._quotaCap=Math.max(20,Math.round(300*Math.max(0.1,(1-q.percent/100)/0.4)));
   }
-  const sub=await generateSubscription(cfg,request.url,format,request.headers.get('User-Agent')||'',request.cf?.colo,env);
-  return new Response(sub.body,{headers:{'Content-Type':sub.type+'; charset=utf-8','Cache-Control':'no-store','Referrer-Policy':'no-referrer','Content-Disposition':'attachment; filename="CFNext"'}});
+  return generateSubscription(cfg,request.url);
+}
+async function subscriptionResponse(cfg,request){
+  const sub=await subscriptionForRequest(cfg,request);
+  return new Response(sub.body,{headers:{'Content-Type':sub.type+'; charset=utf-8','Cache-Control':'no-store','Referrer-Policy':'no-referrer','Content-Disposition':'attachment; filename="cfnext-sub.txt"'}});
 }
 
 // 定时自动优选：拉取候选 → 测速 → 取最优写入优选节点

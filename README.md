@@ -5,7 +5,7 @@ CFNext 是部署在 Cloudflare Workers / Pages 上的单文件代理与订阅管
 ## 功能
 
 - 支持 VLESS / Trojan WebSocket 和 VLESS XHTTP。
-- 生成常见客户端的订阅，支持预览、复制和下载。
+- 仅生成 UTF-8 明文 VLESS 订阅（每行一个 `vless://` 链接），支持预览、复制、二维码和下载。
 - 管理优选 IP、域名来源、节点筛选与数量上限。
 - 支持 SOCKS5、HTTP/HTTPS CONNECT 和 Shadowsocks 出站代理。
 - 通过 Cloudflare KV 保存配置，支持配置导入与导出。
@@ -51,10 +51,12 @@ CFNext 是部署在 Cloudflare Workers / Pages 上的单文件代理与订阅管
 
 1. 访问 `https://你的域名/login`，使用 `ADMIN` 密码登录。未登录访问根路径返回 404 属于正常行为。
 2. 在面板中设置协议、优选地址和筛选条件，点击「保存全部」。
-3. 回到仪表盘，选择客户端订阅格式，复制订阅链接并导入客户端。
+3. 回到仪表盘，复制明文 VLESS 订阅链接并导入支持此格式的客户端。
 4. 在客户端更新订阅并测试节点，按实际网络情况选择使用。
 
-默认订阅地址为 `/s/<订阅令牌>/sub`，具体链接直接从面板复制。订阅包含连接凭据，请勿公开分享。使用 Surfboard 格式前需启用 Trojan。
+默认订阅地址为 `/s/<订阅令牌>/sub`，具体链接直接从面板复制。订阅包含连接凭据，请勿公开分享。订阅只包含已启用的 VLESS WebSocket / VLESS XHTTP 节点，不包含分流规则，也不按客户端或 User-Agent 转换格式。Trojan 连接兼容仍可开启，但不会生成 Trojan 订阅节点。
+
+旧版带 `/clash`、`/singbox`、`/plain` 等格式后缀的订阅地址已移除，请从面板重新复制无格式后缀的订阅地址。
 
 右上角主题按钮按「跟随系统 → 日间 → 夜间 → 跟随系统」循环，手动偏好保存在当前浏览器。
 
@@ -71,3 +73,13 @@ CFNext 是部署在 Cloudflare Workers / Pages 上的单文件代理与订阅管
 - 地区不明的通用节点仍沿用原有兜底规则；筛选无结果时会逐级放宽条件。
 - 节点可用性取决于客户端网络、数据来源与出站服务；面板测速仅供参考。
 - 部署和运行受 Cloudflare 套餐限制，用量以 Cloudflare 控制台为准。
+
+## 本地检查
+
+使用 Node.js 运行订阅回归测试：
+
+```sh
+node --test tests/subscription.test.mjs
+```
+
+测试在隔离环境中模拟 KV 和外部数据源，不连接真实代理。
