@@ -3,8 +3,8 @@
 //  CFNext —— Cloudflare 代理管理面板 · 全新独立编写
 //  ----------------------------------------------------------------------------
 //  环境变量：
-//    U            VLESS UUID（必填，同时用作面板访问路径，除非设置了 D）
-//    D / PATH     自定义面板路径（可选）
+//    U            VLESS UUID（必填，仅决定代理身份与代理路径）
+//    D / PATH     管理面板路径（必填，必须与 UUID 不同）
 //    ADMIN        管理面板必需的密码，建议使用 Secret（未设置则关闭管理面板）
 //    HOST         自定义 SNI/Host（可选，默认使用 Worker 域名）
 //    PROXYIP      自定义反代/落地 IP（可选，填写后作为固定出口优先使用；留空则直连失败时由内置地区反代兜底，格式 host 或 host:port）
@@ -166,7 +166,7 @@ function isTrustedRegionPool(url) {
 
 const DEFAULT_CONFIG = {
   uuid: '',
-  path: '',            // 管理面板路径，留空用 UUID；代理路径始终使用 UUID
+  path: '',            // 管理面板路径必填且与 UUID 不同；代理路径始终使用 UUID
   admin: '',
   host: '',
   // 协议开关
@@ -662,6 +662,8 @@ function publicConfig(cfg, env) {
 }
 function validateConfig(cfg) {
   if (!isUUID(cfg.uuid)) throw new AppError(503, '请配置有效的 U（UUID）');
+  if (typeof cfg.path !== 'string' || !cfg.path.trim()) throw new AppError(400, '请配置管理面板路径 D（必填）');
+  if (cfg.path.toLowerCase() === cfg.uuid.toLowerCase()) throw new AppError(400, '管理面板路径必须与 UUID 不同');
   for (const key of ['path', 'subUrl']) {
     if (cfg[key] && (!/^[A-Za-z0-9_.~-]{1,128}$/.test(cfg[key]) || ['s','login','version','favicon.ico'].includes(cfg[key]))) throw new AppError(400, '面板路径和订阅别名必须是单个非保留路径段');
   }
@@ -701,7 +703,7 @@ async function loadConfig(env) {
   if (env.PROBE_ALIVE !== undefined) cfg.probeAlive = /^(1|true)$/.test(String(env.PROBE_ALIVE));
   cfg._noExitProbe = /^(0|false)$/.test(String(env.RELAY_EXIT_PROBE || ''));
   cfg.uuid = String(cfg.uuid || '').toLowerCase();
-  cfg.path = String(cfg.path || cfg.uuid).replace(/^\/+|\/+$/g, '');
+  cfg.path = String(cfg.path || '').replace(/^\/+|\/+$/g, '');
   cfg.subUrl = String(cfg.subUrl || '').trim().replace(/^\/+|\/+$/g, '').replace(/\/sub$/, '');
   validateConfig(cfg);
   cfg.subToken = String(env.SUB_TOKEN || await signValue(cfg.uuid, 'CFNext/subscription/v1'));
@@ -3145,7 +3147,7 @@ async function generateSubscription(cfg, requestUrl) {
       rc.preferredIPs = [...stableNodes, ...rc.preferredIPs.filter(x => !stableSet.has(x.ip))];
     }
   }
-  // 去重下发：读取上次已下发 IP（KV issued），所有模式均生效（随机补足 / 随机优选 / 自定义解析）
+  // 可选跳过集合：当前请求流程不注入 _skipIssued，也不从 KV 读取已下发 IP；轮询由 _rotationSeed 控制。
   const skipSet = (cfg._skipIssued && cfg._skipIssued.size) ? cfg._skipIssued : null;
   if (resolved.length) {
     // 新 IP 优先排前（供客户端优先连接），已下发过的 IP 紧随其后作为数量补齐——
@@ -3819,7 +3821,7 @@ pre.code{background:var(--bg2);border:1px solid var(--border);border-radius:8px;
             <button class="btn sm" onclick="genUuid()">生成</button>
           </div>
         </div>
-        <div class="field"><label>面板路径（访问入口，留空用 UUID）</label><input type="text" id="a-path" placeholder="留空自动使用 UUID" autocomplete="off"></div>
+        <div class="field"><label>面板路径（必填，与 UUID 不同）</label><input type="text" id="a-path" placeholder="例如 panel，必须独立设置" autocomplete="off" required></div>
         <div class="field"><label>自定义订阅别名（如 AAZ；留空使用令牌路径）</label><input type="text" id="a-suburl" placeholder="AAZ" autocomplete="off"></div>
         <div class="field"><label>管理密码（至少 8 位，留空保留已配置密码）</label><input type="password" id="a-admin" placeholder="设置后访问面板需登录" autocomplete="new-password"></div>
         <div class="field" style="margin-bottom:0"><label>绑定域名（留空使用当前访问域名）</label><input type="text" id="a-host" placeholder="node.example.com" autocomplete="off"></div>
@@ -4353,7 +4355,7 @@ function collectForm(){
   });
   return {
     uuid: $('a-uuid').value.trim(),
-    path: $('a-path').value.trim() || $('a-uuid').value.trim(),
+    path: $('a-path').value.trim(),
     subUrl: $('a-suburl').value.trim(),
     admin: $('a-admin').value,
     clearSecrets: [['a-cftoken','cfApiToken'],['s-outbound','outboundProxy']].filter(function(p){return $(p[0]+'-clear')&&$(p[0]+'-clear').value==='1';}).map(function(p){return p[1];}),
@@ -4960,7 +4962,7 @@ async function subscriptionResponse(cfg,request){
   return new Response(sub.body,{headers:{'Content-Type':sub.type+'; charset=utf-8','Cache-Control':'no-store','Referrer-Policy':'no-referrer','Content-Disposition':'attachment; filename="cfnext-sub.txt"'}});
 }
 
-// 定时自动优选：拉取候选 → 测速 → 取最优写入优选节点
+// 定时入口已停用：仅记录日志，不执行测速或写入优选节点。
 async function handleScheduled() {
   // Pages has no Cron trigger. Edge TCP measurements of CF addresses do not measure client reachability.
   console.warn(JSON.stringify({event:'scheduled_disabled',reason:'use_client_side_measurements'}));
